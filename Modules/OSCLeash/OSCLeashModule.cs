@@ -110,7 +110,7 @@ public class OSCLeashModule : Module
         CreateSlider(OSCLeashSetting.VerticalMovementSmoothing, "Vertical Smoothing", 
             "Smoothing factor for height changes (0-1). At 0: immediate changes but may be jittery, " +
             "at 1: very smooth but more delayed.", 
-            0.8f, 0.0f, 1.0f);
+            0.95f, 0.0f, 1.0f);
             
         CreateSlider(OSCLeashSetting.VerticalHorizontalCompensation, "Vertical Angle", 
             "Required angle from horizontal for height changes (15-75°). Lower angles (15°) make vertical movement " +
@@ -146,22 +146,22 @@ public class OSCLeashModule : Module
         RegisterParameter<float>(OSCLeashParameter.Stretch, "Leash_Stretch", 
             ParameterMode.Read, "Leash Stretch", "How far the leash is stretched");
             
-        RegisterParameter<float>(OSCLeashParameter.ZPositive, "Leash_ZPositive", 
+        RegisterParameter<float>(OSCLeashParameter.ZPositive, "Leash_Z+", 
             ParameterMode.Read, "Forward Pull", "Forward movement value", false);
             
-        RegisterParameter<float>(OSCLeashParameter.ZNegative, "Leash_ZNegative", 
+        RegisterParameter<float>(OSCLeashParameter.ZNegative, "Leash_Z-", 
             ParameterMode.Read, "Backward Pull", "Backward movement value", false);
             
-        RegisterParameter<float>(OSCLeashParameter.XPositive, "Leash_XPositive", 
+        RegisterParameter<float>(OSCLeashParameter.XPositive, "Leash_X+", 
             ParameterMode.Read, "Right Pull", "Rightward movement value", false);
             
-        RegisterParameter<float>(OSCLeashParameter.XNegative, "Leash_XNegative", 
+        RegisterParameter<float>(OSCLeashParameter.XNegative, "Leash_X-", 
             ParameterMode.Read, "Left Pull", "Leftward movement value", false);
             
-        RegisterParameter<float>(OSCLeashParameter.YPositive, "Leash_YPositive", 
+        RegisterParameter<float>(OSCLeashParameter.YPositive, "Leash_Y+", 
             ParameterMode.Read, "Upward Pull", "Upward movement value", false);
             
-        RegisterParameter<float>(OSCLeashParameter.YNegative, "Leash_YNegative", 
+        RegisterParameter<float>(OSCLeashParameter.YNegative, "Leash_Y-", 
             ParameterMode.Read, "Downward Pull", "Downward movement value", false);
     }
     

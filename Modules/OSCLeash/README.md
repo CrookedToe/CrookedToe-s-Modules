@@ -10,9 +10,7 @@
     </p>
 </div>
 
-This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/ZenithVal/OSCLeash), rewritten in C# to work within VRCOSC's module system. While the core functionality remains the same*, this version integrates directly with VRCOSC for a more streamlined experience. For detailed information about the original implementation, advanced features, and troubleshooting, please visit the original repository.
-
-> ⚠️ **WARNING**: This project is currently a Work In Progress. Features may be incomplete, unstable, or subject to significant changes. Use at your own risk and please report any issues you encounter.
+This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/ZenithVal/OSCLeash), rewritten in C# to work within VRCOSC's module system. While the core functionality remains the same*, this version integrates directly with VRCOSC for a more streamlined experience.
 
 # Quick Start Guide
 
@@ -22,13 +20,6 @@ This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/Zenith
 - Windows 10/11
 - VRChat with OSC enabled
 
-## Known Issues
-- Parameter names containing '+' are not received by the module due to an upstream SDK limitation. In your Unity parameters, rename:
-  - `X+` to `XPositive`
-  - `Y+` to `YPositive`
-  - `Z+` to `ZPositive`
-  This is required until the VRCOSC SDK parameter handling is updated.
-
 ## Installation Steps
 
 ### 1. Module Setup
@@ -36,56 +27,51 @@ This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/Zenith
 2. Configure the module settings in VRCOSC's UI
 
 ### 2. Avatar Setup
-1. Import the prefab (`OSCLeash.prefab`) from releases into your Unity project
-2. Place the prefab at the root of your model (NOT as a child of armature)
-3. Configure the Physbone:
-   - Select `Leash Physbone` and assign its Root Transform to your leash's first bone
-   - Select `Compass` and assign the Position constraint source to the first bone
-   - Select `Aim Needle` (child of Compass) and assign the Aim constraint source to the last bone
+1. Import the Unity package from releases into your Unity project
+2. Drag the `OSCLeash` prefab onto your avatar in the hierarchy
+3. Select the first bone of your leash and drag it into the the prefab settings 
+4. click "Auto Setup"
 
 ### 3. Parameter Setup
-The module requires the following parameters to be set up in your avatar:
+The module uses the following parameters:
 
 | Parameter | Description |
 |-----------|-------------|
 | `Leash_IsGrabbed` | Physbone grab state |
 | `Leash_Stretch` | Physbone stretch value |
-| `Leash_ZPositive` | Forward movement value |
-| `Leash_ZNegative` | Backward movement value |
-| `Leash_XPositive` | Right movement value |
-| `Leash_XNegative` | Left movement value |
-| `Leash_YPositive` | Up movement value |
-| `Leash_YNegative` | Down movement value |
-
-The leash direction is set in the module settings:
-- `North` - Front-facing leash (default)
-- `South` - Back-facing leash
-- `East` - Right-facing leash
-- `West` - Left-facing leash
+| `Leash_Z+` | Forward movement value |
+| `Leash_Z-` | Backward movement value |
+| `Leash_X+` | Right movement value |
+| `Leash_X-` | Left movement value |
+| `Leash_Y+` | Up movement value |
+| `Leash_Y-` | Down movement value |
 
 # Configuration
 
-## Basic Settings
+## Movement Settings
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Leash Direction | Direction the leash faces | North |
-| Walk Deadzone | Minimum stretch for walking | 0.15 |
-| Run Deadzone | Minimum stretch for running | 0.70 |
-| Strength Multiplier | Movement speed multiplier | 1.2 |
+| Leash Direction | Direction the leash faces (North/South/East/West) | North |
+| Walk Deadzone | Minimum stretch required to start walking | 0.15 |
+| Run Deadzone | Minimum stretch required to start running | 0.70 |
+| Strength Multiplier | Overall movement speed multiplier (0.1-5.0) | 1.2 |
 
-## Up/Down Control Settings
+## Vertical Movement Settings
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Up/Down Compensation | Compensation for vertical movement | 1.0 |
-| Up/Down Deadzone | Vertical angle deadzone | 0.5 |
+| Vertical Movement Enabled | Enables OpenVR height adjustment | false |
+| Vertical Movement Multiplier | Speed of height changes (0.1-5.0) | 1.0 |
+| Vertical Movement Deadzone | Minimum pull needed for height change | 0.15 |
+| Vertical Movement Smoothing | Smoothness of height changes (0-1) | 0.95 |
+| Vertical Angle | Required angle for vertical movement (15-75°) | 45° |
 
 ## Turning Settings
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Turning Enabled | Enable turning control | false |
-| Turning Multiplier | Turning speed multiplier | 0.80 |
+| Turning Multiplier | Turning speed multiplier (0.1-2.0) | 0.80 |
 | Turning Deadzone | Minimum stretch for turning | 0.15 |
-| Turning Goal | Maximum turning angle in degrees | 90° |
+| Turning Goal | Maximum turning angle (0-180°) | 90° |
 
 # Troubleshooting
 
@@ -96,13 +82,18 @@ The leash direction is set in the module settings:
   - Verify parameter names match exactly (including case)
   - Check that the leash name in settings matches your parameter prefix
 - **Incorrect Movement**: 
-  - Check physbone constraints and contact setup
-  - Verify the leash direction setting matches your setup
+  - Check that the leash direction setting matches your setup
+  - Verify the auto-setup completed successfully
+- **No Vertical Movement**: 
+  - Ensure SteamVR is running
+  - Check that Vertical Movement is enabled in settings
+  - Pull at an angle greater than the Vertical/Horizontal Compensation setting
 - **No Turning**: 
-  - Check that turning is enabled in settings
-  - Verify the leash direction is set correctly
+  - Verify turning is enabled in settings
+  - Check that the leash direction matches your setup
+  - Pull beyond the turning deadzone threshold
 
 ## Getting Help
 - Join the [Discord](https://discord.com/invite/vj4brHyvT5) for VRCOSC support
 - Create an [Issue](https://github.com/CrookedToe/OSCLeash/issues) for bug reports
-- Check VRCOSC logs for any error messages- Enable debug logging for detailed state information
+- Check VRCOSC logs for any error messages

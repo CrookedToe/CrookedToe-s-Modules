@@ -2,13 +2,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <LangVersion>latestmajor</LangVersion>
-    <WindowsSdkPackageVersion>10.0.22621.52</WindowsSdkPackageVersion>
+    <WindowsSdkPackageVersion>10.0.26100.1</WindowsSdkPackageVersion>
     <SupportedOSPlatform>windows10.0.22621.0</SupportedOSPlatform>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -19,7 +19,7 @@
 
   <ItemGroup>
     <PackageReference Include="NWaves" Version="0.9.6" GeneratePathProperty="true" />
-    <PackageReference Include="VolcanicArts.VRCOSC.SDK" Version="2024.1223.0" />
+    <PackageReference Include="VolcanicArts.VRCOSC.SDK" Version="2025.212.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 
