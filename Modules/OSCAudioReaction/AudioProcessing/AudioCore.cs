@@ -62,11 +62,17 @@ public class AudioProcessor : IAudioProcessor, IDisposable
     private bool _isDisposed;
     private int _adaptedFftSize;
     
+    // Enhanced direction processing
+    private EnhancedDirectionProcessor? _enhancedDirectionProcessor;
+    private OpenVRManager? _openVRManager;
+    private bool _enhancedDirectionEnabled;
+    private bool _headOrientationEnabled;
+    
     // Constants
     private const float MIN_VALID_SIGNAL = 1e-6f;
     private const float MIN_SPIKE_VOLUME = 0.1f;
     private const int MIN_SPIKE_INTERVAL_MS = 100;
-    private const int SPIKE_DURATION_MS = 50;
+    private const int SPIKE_DURATION_MS = 1000;
     private const int VOLUME_HISTORY_SIZE = 3;
     private const int MIN_SAMPLES = 128;
 
@@ -78,6 +84,8 @@ public class AudioProcessor : IAudioProcessor, IDisposable
     public float[] FrequencyBands => _smoothedBands;
     public bool IsActive => _isActive;
     public bool HasSpike => _currentSpike;
+    public bool EnhancedDirectionEnabled => _enhancedDirectionEnabled;
+    public bool HeadOrientationEnabled => _headOrientationEnabled && _openVRManager?.IsInitialized == true;
 
     public AudioProcessor(IAudioConfiguration config, int bytesPerSample)
     {
@@ -108,6 +116,11 @@ public class AudioProcessor : IAudioProcessor, IDisposable
         _enabledBands = new bool[config.FrequencyBands];
         _bandDirections = new float[config.FrequencyBands];
         Array.Fill(_bandDirections, 0.5f);
+        
+        // Initialize enhanced direction processing
+        _enhancedDirectionProcessor = new EnhancedDirectionProcessor(config);
+        _enhancedDirectionEnabled = false;
+        _headOrientationEnabled = false;
         
         _lastProcessTime = DateTime.Now;
         ConfigureFrequencyBands(config.FrequencySmoothing, new bool[AudioConstants.DEFAULT_FREQUENCY_BANDS]);
@@ -394,6 +407,27 @@ public class AudioProcessor : IAudioProcessor, IDisposable
 
     private float CalculateDirection(Complex[] leftSpectrum, Complex[] rightSpectrum)
     {
+        // If enhanced direction detection is enabled, use that
+        if (_enhancedDirectionEnabled && _enhancedDirectionProcessor != null)
+        {
+            float enhancedDirection = _enhancedDirectionProcessor.CalculateDirection(
+                leftSpectrum, 
+                rightSpectrum, 
+                AudioConstants.DEFAULT_SAMPLE_RATE,
+                _enabledBands
+            );
+            
+            // If head orientation is enabled, adjust the direction based on head yaw
+            if (_headOrientationEnabled && _openVRManager != null && _openVRManager.IsInitialized)
+            {
+                _openVRManager.UpdateHeadOrientation();
+                return _openVRManager.GetNormalizedAudioDirection(enhancedDirection);
+            }
+            
+            return enhancedDirection;
+        }
+        
+        // Otherwise, use the original algorithm
         float leftPower = 0f;
         float rightPower = 0f;
         int enabledBandCount = 0;
@@ -646,6 +680,30 @@ public class AudioProcessor : IAudioProcessor, IDisposable
         if (enabledBands == null || enabledBands.Length < 1) return;
         
         Array.Copy(enabledBands, _enabledBands, Math.Min(enabledBands.Length, _enabledBands.Length));
+    }
+
+    public void SetOpenVRManager(OpenVRManager? manager)
+    {
+        _openVRManager = manager;
+    }
+    
+    public void EnableEnhancedDirection(bool enabled)
+    {
+        _enhancedDirectionEnabled = enabled;
+    }
+    
+    public void EnableHeadOrientation(bool enabled)
+    {
+        _headOrientationEnabled = enabled;
+    }
+    
+    public void ConfigureEnhancedDirection(float magnitudeWeight, bool enablePhaseAnalysis)
+    {
+        if (_enhancedDirectionProcessor == null)
+            return;
+            
+        _enhancedDirectionProcessor.SetMagnitudeWeight(magnitudeWeight);
+        _enhancedDirectionProcessor.SetPhaseAnalysisEnabled(enablePhaseAnalysis);
     }
 
     protected virtual void Dispose(bool disposing)

@@ -19,7 +19,7 @@
 
   <ItemGroup>
     <PackageReference Include="NWaves" Version="0.9.6" GeneratePathProperty="true" />
-    <PackageReference Include="VolcanicArts.VRCOSC.SDK" Version="2025.212.0" />
+    <PackageReference Include="VolcanicArts.VRCOSC.SDK" Version="2025.327.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 

@@ -41,6 +41,8 @@ public interface IAudioProcessor : IDisposable
     float[] FrequencyBands { get; }
     bool IsActive { get; }
     bool HasSpike { get; }
+    bool EnhancedDirectionEnabled { get; }
+    bool HeadOrientationEnabled { get; }
 
     // State mutation methods
     (float[] bands, float volume, float direction, bool spike) ProcessAudioData(WaveInEventArgs e, bool scaleWithVolume);
@@ -49,6 +51,12 @@ public interface IAudioProcessor : IDisposable
     void UpdateGain(float gain);
     void UpdateSmoothing(float smoothing);
     void ConfigureFrequencyBands(float smoothing, bool[] enabledBands);
+    
+    // Enhanced direction methods
+    void SetOpenVRManager(OpenVRManager? manager);
+    void EnableEnhancedDirection(bool enabled);
+    void EnableHeadOrientation(bool enabled);
+    void ConfigureEnhancedDirection(float magnitudeWeight, bool enablePhaseAnalysis);
 }
 
 public interface IAudioFactory

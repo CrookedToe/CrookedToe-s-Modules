@@ -33,6 +33,18 @@ public class OSCAudioDirectionModule : Module
     private float _currentDirection;
     private volatile bool _configurationChanged;
 
+    // Frequency band information for consistent use across the module
+    private static readonly (AudioParameter Parameter, AudioSetting Setting, string Name, string Description)[] FrequencyBandInfo = 
+    {
+        (AudioParameter.SubBassVolume, AudioSetting.EnableSubBass, "Sub Bass (16-60Hz)", "Very low frequencies: bass drops, explosions, rumble effects"),
+        (AudioParameter.BassVolume, AudioSetting.EnableBass, "Bass (60-250Hz)", "Low frequencies: bass guitar, kick drums, male vocals"),
+        (AudioParameter.LowMidVolume, AudioSetting.EnableLowMid, "Low Mid (250-500Hz)", "Lower midrange: bass line melodies, lower harmonics"),
+        (AudioParameter.MidVolume, AudioSetting.EnableMid, "Mid (500Hz-2kHz)", "Main vocal range, most instruments' fundamental frequencies"),
+        (AudioParameter.UpperMidVolume, AudioSetting.EnableUpperMid, "Upper Mid (2-4kHz)", "Presence range: vocal clarity, instrument attack sounds"),
+        (AudioParameter.PresenceVolume, AudioSetting.EnablePresence, "Presence (4-6kHz)", "Definition range: speech intelligibility, high harmonics"),
+        (AudioParameter.BrillianceVolume, AudioSetting.EnableBrilliance, "Brilliance (6-20kHz)", "Air frequencies: cymbals, sibilance, sparkle")
+    };
+
     private enum AudioParameter 
     { 
         AudioDirection, 
@@ -65,7 +77,16 @@ public class OSCAudioDirectionModule : Module
         EnableUpperMid,     // 2-4kHz
         EnablePresence,     // 4-6kHz
         EnableBrilliance,   // 6-20kHz
-        FrequencySmoothing  // Smoothing for frequency analysis
+        FrequencySmoothing,  // Smoothing for frequency analysis
+        
+        // Enhanced direction settings
+        EnableEnhancedDirection,
+        MagnitudePhaseRatio,
+        EnablePhaseAnalysis,
+        
+        // OpenVR integration
+        // EnableHeadOrientation,
+        // HeadOrientationSmoothing
     }
 
     private enum PresetSelection
@@ -144,6 +165,19 @@ public class OSCAudioDirectionModule : Module
         CreateToggle(AudioSetting.EnableBrilliance, "Brilliance (6-20kHz)", 
             "Air frequencies: cymbals, sibilance, sparkle", false);
 
+        // Enhanced Audio Direction Settings
+        CreateToggle(AudioSetting.EnableEnhancedDirection, "Enhanced Direction Detection", 
+            "Use advanced algorithm for more accurate audio direction detection. Inspired by spatial audio technology.", 
+            false);
+        
+        CreateToggle(AudioSetting.EnablePhaseAnalysis, "Enable Phase Analysis", 
+            "Use phase difference between channels to improve direction detection. Most effective with headphones.", 
+            true);
+        
+        CreateSlider(AudioSetting.MagnitudePhaseRatio, "Magnitude/Phase Balance", 
+            "Balance between magnitude-based (0) and phase-based (1) direction calculation.", 
+            0.3f, 0.0f, 1.0f);
+
         // Main parameters
         RegisterParameter<float>(AudioParameter.AudioDirection, "audio_direction", 
             ParameterMode.Write, "Audio Direction", "0=left, 0.5=center, 1=right");
@@ -191,6 +225,11 @@ public class OSCAudioDirectionModule : Module
             AudioSetting.EnableSubBass, AudioSetting.EnableBass, AudioSetting.EnableLowMid, 
             AudioSetting.EnableMid, AudioSetting.EnableUpperMid, AudioSetting.EnablePresence, 
             AudioSetting.EnableBrilliance);
+        
+        CreateGroup("Enhanced Direction", 
+            AudioSetting.EnableEnhancedDirection, 
+            AudioSetting.EnablePhaseAnalysis,
+            AudioSetting.MagnitudePhaseRatio);
     }
 
     protected override async Task<bool> OnModuleStart()
@@ -240,17 +279,19 @@ public class OSCAudioDirectionModule : Module
         SendParameter(AudioParameter.AudioVolume, 0f);
         SendParameter(AudioParameter.AudioDirection, 0.5f);
         SendParameter(AudioParameter.AudioSpike, false);
-        SendParameter(AudioParameter.SubBassVolume, 0f);
-        SendParameter(AudioParameter.BassVolume, 0f);
-        SendParameter(AudioParameter.LowMidVolume, 0f);
-        SendParameter(AudioParameter.MidVolume, 0f);
-        SendParameter(AudioParameter.UpperMidVolume, 0f);
-        SendParameter(AudioParameter.PresenceVolume, 0f);
-        SendParameter(AudioParameter.BrillianceVolume, 0f);
         
-        // Let VRCOSC handle the cleanup
-        _audioProcessor = null;
+        // Reset frequency band parameters
+        foreach (var band in FrequencyBandInfo)
+        {
+            SendParameter(band.Parameter, 0f);
+        }
+        
+        // Dispose resources
+        _deviceManager?.Dispose();
         _deviceManager = null;
+        
+        _audioProcessor?.Dispose();
+        _audioProcessor = null;
         
         return Task.CompletedTask;
     }
@@ -357,16 +398,10 @@ public class OSCAudioDirectionModule : Module
                 _audioProcessor.UpdateGain(_config.Gain);
                 _audioProcessor.UpdateSmoothing(_config.Smoothing);
 
-                var enabledBands = new[]
-                {
-                    GetSettingValue<bool>(AudioSetting.EnableSubBass),
-                    GetSettingValue<bool>(AudioSetting.EnableBass),
-                    GetSettingValue<bool>(AudioSetting.EnableLowMid),
-                    GetSettingValue<bool>(AudioSetting.EnableMid),
-                    GetSettingValue<bool>(AudioSetting.EnableUpperMid),
-                    GetSettingValue<bool>(AudioSetting.EnablePresence),
-                    GetSettingValue<bool>(AudioSetting.EnableBrilliance)
-                };
+                // Use FrequencyBandInfo to get enabled bands
+                var enabledBands = FrequencyBandInfo
+                    .Select(band => GetSettingValue<bool>(band.Setting))
+                    .ToArray();
                 
                 _audioProcessor.ConfigureFrequencyBands(_config.FrequencySmoothing, enabledBands);
                 _configurationChanged = false;
@@ -427,15 +462,14 @@ public class OSCAudioDirectionModule : Module
                 _lastDirectionUpdate = now;
             }
 
-            // Always update frequency bands
-            if (bands.Length >= 7)
+            // Update frequency bands
+            if (bands.Length >= FrequencyBandInfo.Length)
             {
-                for (int i = 0; i < bands.Length && i < 7; i++)
+                for (int i = 0; i < FrequencyBandInfo.Length; i++)
                 {
-                    var parameter = (AudioParameter)(AudioParameter.SubBassVolume + i);
-                    var enableSetting = (AudioSetting)(AudioSetting.EnableSubBass + i);
-                    var value = GetSettingValue<bool>(enableSetting) ? Math.Min(bands[i], 1.0f) : 0f;
-                    SendParameter(parameter, value);
+                    var bandInfo = FrequencyBandInfo[i];
+                    var value = GetSettingValue<bool>(bandInfo.Setting) ? Math.Min(bands[i], 1.0f) : 0f;
+                    SendParameter(bandInfo.Parameter, value);
                 }
             }
 
@@ -471,5 +505,33 @@ public class OSCAudioDirectionModule : Module
         {
             Log($"Error in update loop: {ex.Message}");
         }
+    }
+
+    private void OnModuleSettingChanged(string settingId)
+    {
+        if (!Enum.TryParse<AudioSetting>(settingId, out var audioSetting))
+            return;
+            
+        switch (audioSetting)
+        {
+            case AudioSetting.EnableEnhancedDirection:
+                if (_audioProcessor != null)
+                    _audioProcessor.EnableEnhancedDirection(GetSettingValue<bool>(AudioSetting.EnableEnhancedDirection));
+                break;
+                
+            case AudioSetting.EnablePhaseAnalysis:
+                UpdateDirectionCalculationSettings();
+                break;
+        }
+        _configurationChanged = true;
+    }
+
+    private void UpdateDirectionCalculationSettings()
+    {
+        if (_audioProcessor == null) return;
+        
+        float magnitudeWeight = 1.0f - GetSettingValue<float>(AudioSetting.MagnitudePhaseRatio);
+        bool enablePhaseAnalysis = GetSettingValue<bool>(AudioSetting.EnablePhaseAnalysis);
+        _audioProcessor.ConfigureEnhancedDirection(magnitudeWeight, enablePhaseAnalysis);
     }
 } 
