@@ -15,6 +15,10 @@ Captures your system's audio output and sends stereo direction and volume inform
 1. enable CrookedToe's Modules in the packages
 2. Enable the desired modules in VRCOSC
 3. Configure each module's settings as needed
+=======
+1. Enable the desired modules in VRCOSC
+2. Configure each module's settings as needed
+>>>>>>> cc01f08e2b63ab8896abee85f8b9a571e24b6d3e
 
 ## Development
 
