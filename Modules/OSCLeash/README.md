@@ -10,7 +10,7 @@
     </p>
 </div>
 
-This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/ZenithVal/OSCLeash), rewritten in C# to work within VRCOSC's module system. While the core functionality remains the same*, this version integrates directly with VRCOSC for a more streamlined experience. For detailed information about the original implementation, advanced features, and troubleshooting, please visit the original repository.
+This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/ZenithVal/OSCLeash), rewritten in C# to work within VRCOSC's module system. This version features optimized low-latency response for immediate grab detection and movement, running at 60Hz with automatic performance scaling. For detailed information about the original implementation, advanced features, and troubleshooting, please visit the original repository.
 
 > ⚠️ **WARNING**: This project is currently a Work In Progress. Features may be incomplete, unstable, or subject to significant changes. Use at your own risk and please report any issues you encounter.
 
@@ -22,8 +22,23 @@ This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/Zenith
 - Windows 10/11
 - VRChat with OSC enabled
 
+## OVRAdvancedSettings Compatibility
+
+This module is now fully compatible with OVRAdvancedSettings! The leash system will:
+
+- **Preserve OVRAdvancedSettings offsets**: All X, Y, and Z offsets from OVRAdvancedSettings are maintained
+- **Detect OVRAdvancedSettings changes**: Automatically adapts when you adjust your playspace through OVRAdvancedSettings
+- **Coordinate transformations**: Works alongside OVRAdvancedSettings' space drag, manual offsets, and physics systems
+- **Maintain baseline state**: Captures and preserves your OVRAdvancedSettings configuration when the leash is grabbed
+
+### How it works:
+1. When OSCLeash initializes, it captures your current OVRAdvancedSettings state as the baseline
+2. When you grab the leash, it refreshes the baseline to ensure compatibility
+3. All vertical movement preserves your OVRAdvancedSettings X/Z offsets and rotation
+4. The system automatically detects and adapts to OVRAdvancedSettings changes
+
 ## Known Issues
-- when moving vertically with both gravity on and space drag moved, you will first be reset to the ground then pulled in the direction
+- None currently known - please report any issues you encounter
 
 ## Installation Steps
 
@@ -99,10 +114,9 @@ The leash direction is set in the module settings:
 ## Common Issues
 - **No Movement Response**: 
   - Verify OSC is enabled in VRChat
-  - Manually delete the OSC avatar files from your computer
   - Check that VRCOSC is running
   - Verify parameter names match exactly (including case)
-  - Check that the leash name in settings matches your parameter prefix
+  - Check that the leash parameter name is "Leash" 
 - **Incorrect Movement**: 
   - Check physbone constraints and contact setup
   - Verify the leash direction setting matches your setup

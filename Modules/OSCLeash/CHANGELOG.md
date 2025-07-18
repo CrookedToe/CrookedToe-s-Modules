@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [0.2.3] - 2025-01-13
+
+### Changed
+- Increased update frequency from 30Hz to 60Hz for improved responsiveness
+- Reduced movement smoothing delays and thresholds for faster grab response
+- Optimized grab state detection for immediate processing
+
+### Added
+- Low-latency mode that activates automatically when leash is grabbed
+- Immediate parameter processing bypass for grab events
+
 ## [0.2.2] - 2025-01-13
 
 ### Fixed

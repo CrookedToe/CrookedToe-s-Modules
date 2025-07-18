@@ -53,3 +53,10 @@ Desktop.ini
 CrookedToesModules.sln
 
 /Resources/
+
+.cursorrules
+.mdc
+.cursor/rules/modulehowto.mdc
+
+.VRCOSC-Modules-main/
+.cursor/rules/modulehowto.md

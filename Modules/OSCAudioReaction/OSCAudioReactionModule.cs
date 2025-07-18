@@ -1,537 +1,665 @@
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using VRCOSC.App.SDK.Modules;
-using VRCOSC.App.SDK.Modules.Attributes.Settings;
 using VRCOSC.App.SDK.Parameters;
-using VRCOSC.App.SDK.VRChat;
-using CrookedToe.Modules.OSCAudioReaction.AudioProcessing;
 
 namespace CrookedToe.Modules.OSCAudioReaction;
 
-[ModuleTitle("Audio Direction")]
-[ModuleDescription("Sends audio direction and volume to VRChat for stereo visualization")]
+/// <summary>
+/// OSC Audio Reaction Module - Captures system audio and sends comprehensive analysis to VRChat
+/// </summary>
+[ModuleTitle("OSC Audio Reaction")]
+[ModuleDescription("Comprehensive audio analysis with direction, volume, frequency bands, and intelligent spike detection")]
 [ModuleType(ModuleType.Generic)]
-public class OSCAudioDirectionModule : Module
+public class OSCAudioReactionModule : Module
 {
-    private const int PROCESSING_LOCK_TIMEOUT_MS = 5;
-    
-    private readonly IAudioFactory _audioFactory;
-    private readonly SemaphoreSlim _processingLock = new(1, 1);
-    private readonly object _configLock = new();
-    
-    private IAudioProcessor? _audioProcessor;
-    private IAudioDeviceManager? _deviceManager;
-    private IAudioConfiguration _config;
-    
-    private DateTime _lastVolumeUpdate = DateTime.Now;
-    private DateTime _lastDirectionUpdate = DateTime.Now;
-    private float _currentVolume;
-    private float _currentDirection;
-    private volatile bool _configurationChanged;
-
-    // Frequency band information for consistent use across the module
-    private static readonly (AudioParameter Parameter, AudioSetting Setting, string Name, string Description)[] FrequencyBandInfo = 
-    {
-        (AudioParameter.SubBassVolume, AudioSetting.EnableSubBass, "Sub Bass (16-60Hz)", "Very low frequencies: bass drops, explosions, rumble effects"),
-        (AudioParameter.BassVolume, AudioSetting.EnableBass, "Bass (60-250Hz)", "Low frequencies: bass guitar, kick drums, male vocals"),
-        (AudioParameter.LowMidVolume, AudioSetting.EnableLowMid, "Low Mid (250-500Hz)", "Lower midrange: bass line melodies, lower harmonics"),
-        (AudioParameter.MidVolume, AudioSetting.EnableMid, "Mid (500Hz-2kHz)", "Main vocal range, most instruments' fundamental frequencies"),
-        (AudioParameter.UpperMidVolume, AudioSetting.EnableUpperMid, "Upper Mid (2-4kHz)", "Presence range: vocal clarity, instrument attack sounds"),
-        (AudioParameter.PresenceVolume, AudioSetting.EnablePresence, "Presence (4-6kHz)", "Definition range: speech intelligibility, high harmonics"),
-        (AudioParameter.BrillianceVolume, AudioSetting.EnableBrilliance, "Brilliance (6-20kHz)", "Air frequencies: cymbals, sibilance, sparkle")
-    };
+    #region Enums
 
     private enum AudioParameter 
     { 
         AudioDirection, 
-        AudioVolume,
-        AudioSpike,
-        // Individual frequency band parameters
-        SubBassVolume,    // 16-60Hz
-        BassVolume,       // 60-250Hz
-        LowMidVolume,     // 250-500Hz
-        MidVolume,        // 500Hz-2kHz
-        UpperMidVolume,   // 2-4kHz
-        PresenceVolume,   // 4-6kHz
-        BrillianceVolume  // 6-20kHz
+        AudioVolume, 
+        AudioSpike, 
+        SubBassVolume, 
+        BassVolume, 
+        LowMidVolume, 
+        MidVolume, 
+        UpperMidVolume, 
+        PresenceVolume, 
+        BrillianceVolume 
     }
-
+    
     private enum AudioSetting 
     { 
         Gain, 
         EnableAGC, 
         Smoothing, 
-        DirectionThreshold,
-        PresetSelection,
-        ScaleFrequencyWithVolume,
-        SpikeThreshold,
-        // Frequency band toggles
-        EnableSubBass,      // 16-60Hz
-        EnableBass,         // 60-250Hz
-        EnableLowMid,       // 250-500Hz
-        EnableMid,          // 500Hz-2kHz
-        EnableUpperMid,     // 2-4kHz
-        EnablePresence,     // 4-6kHz
-        EnableBrilliance,   // 6-20kHz
-        FrequencySmoothing,  // Smoothing for frequency analysis
-        
-        // Enhanced direction settings
-        EnableEnhancedDirection,
-        MagnitudePhaseRatio,
+        DirectionThreshold, 
+        PresetSelection, 
+        ScaleFrequencyWithVolume, 
+        SpikeThreshold, 
+        SpikeHoldDuration, 
+        EnableSubBass, 
+        EnableBass, 
+        EnableLowMid, 
+        EnableMid, 
+        EnableUpperMid, 
+        EnablePresence, 
+        EnableBrilliance, 
+        FrequencySmoothing, 
+        EnableEnhancedDirection, 
+        MagnitudePhaseRatio, 
         EnablePhaseAnalysis,
-        
-        // OpenVR integration
-        // EnableHeadOrientation,
-        // HeadOrientationSmoothing
+        EnableDirectionalPause,
+        DirectionalPauseFactor,
+        EnableHabituation, 
+        HabituationIncrease, 
+        HabituationDecayRate, 
+        HabituationThreshold 
+    }
+    
+    private enum PresetSelection 
+    { 
+        Custom, 
+        Default, 
+        LowLatency, 
+        VoiceOptimized, 
+        HighSmoothing, 
+        MusicOptimized 
     }
 
-    private enum PresetSelection
-    {
-        Custom,
-        Default,         // Balanced settings for most use cases
-        LowLatency,     // For real-time responsiveness
-        VoiceOptimized, // For speech and vocal pattern detection
-        HighSmoothing,  // For stable, gradual reactions
-        MusicOptimized  // For musical performance and visualization
-    }
+    #endregion
 
-    public OSCAudioDirectionModule()
-    {
-        _audioFactory = new AudioFactory();
-        _config = new AudioConfiguration();
-    }
+    #region Private Fields
+
+    private AudioProcessor? _audioProcessor;
+    private SimpleAudioDeviceManager? _audioDeviceManager;
+    
+    private float _currentVolumeLevel;
+    private float _currentDirectionValue = 0.5f;
+    private int _deviceRecoveryAttempts = 0;
+    private DateTime _lastUpdateTime = DateTime.Now;
+    private int _totalAudioFramesProcessed = 0;
+    private DateTime _lastPerformanceLog = DateTime.Now;
+
+    #endregion
+
+    #region Module Lifecycle
 
     protected override void OnPreLoad()
     {
-        // Basic settings
-        CreateDropdown(AudioSetting.PresetSelection, "Avatar Preset", 
-            "Select a preset for your avatar's audio reactions. Each preset has optimized settings for different use cases.", 
-            PresetSelection.Default);
-        
-        CreateToggle(AudioSetting.EnableAGC, "Auto Gain Control", 
-            "Automatically adjusts gain to maintain consistent volume levels. Target level: 0.5", 
-            true);
-        
-        CreateToggle(AudioSetting.ScaleFrequencyWithVolume, "Scale Frequencies with Volume", 
-            "When enabled, frequency bands are scaled by audio volume. When disabled, they show pure proportions (sum to 1)", 
-            true);
-        
-        CreateSlider(AudioSetting.SpikeThreshold, "Spike Sensitivity", 
-            "Threshold for volume spike detection (0.5 = very sensitive, 5.0 = less sensitive). Note: Can be finnicky, works best with sharp volume changes.", 
-            AudioConstants.DEFAULT_SPIKE_THRESHOLD, 
-            AudioConstants.MIN_SPIKE_THRESHOLD, 
-            AudioConstants.MAX_SPIKE_THRESHOLD);
+        RegisterAudioParameters();
+        CreateAudioSettings();
+        CreateAudioSettingsGroups();
+        LogDebug("Module pre-loaded with parameters and settings registered");
+    }
 
-        // Custom Preset Settings
-        CreateSlider(AudioSetting.Gain, "Custom: Gain", 
-            "Manual volume multiplier when using Custom preset or AGC is disabled (0.1 = quiet, 5.0 = loud)", 
-            1.0f, 0.1f, 5.0f);
-        
-        CreateSlider(AudioSetting.Smoothing, "Custom: Animation Smoothing", 
-            "Smoothing factor for avatar animations in Custom preset (0 = immediate response but jittery, 1 = smooth but delayed)", 
-            0.5f, 0.0f, 1.0f);
-        
-        CreateSlider(AudioSetting.DirectionThreshold, "Custom: Direction Sensitivity", 
-            "Minimum volume required to update direction. Lower values are more responsive but may be jittery", 
-            0.01f, 0.0f, 0.1f, 0.005f);
-        
-        CreateSlider(AudioSetting.FrequencySmoothing, "Custom: Frequency Smoothing", 
-            "Smoothing applied to frequency band values. Higher values reduce flickering but increase latency", 
-            0.5f, 0.0f, 1.0f);
-
-        // Frequency band toggles with detailed descriptions
-        CreateToggle(AudioSetting.EnableSubBass, "Sub Bass (16-60Hz)", 
-            "Very low frequencies: bass drops, explosions, rumble effects", false);
-        
-        CreateToggle(AudioSetting.EnableBass, "Bass (60-250Hz)", 
-            "Low frequencies: bass guitar, kick drums, male vocals", true);
-        
-        CreateToggle(AudioSetting.EnableLowMid, "Low Mid (250-500Hz)", 
-            "Lower midrange: bass line melodies, lower harmonics", true);
-        
-        CreateToggle(AudioSetting.EnableMid, "Mid (500Hz-2kHz)", 
-            "Main vocal range, most instruments' fundamental frequencies", true);
-        
-        CreateToggle(AudioSetting.EnableUpperMid, "Upper Mid (2-4kHz)", 
-            "Presence range: vocal clarity, instrument attack sounds", false);
-        
-        CreateToggle(AudioSetting.EnablePresence, "Presence (4-6kHz)", 
-            "Definition range: speech intelligibility, high harmonics", false);
-        
-        CreateToggle(AudioSetting.EnableBrilliance, "Brilliance (6-20kHz)", 
-            "Air frequencies: cymbals, sibilance, sparkle", false);
-
-        // Enhanced Audio Direction Settings
-        CreateToggle(AudioSetting.EnableEnhancedDirection, "Enhanced Direction Detection", 
-            "Use advanced algorithm for more accurate audio direction detection. Inspired by spatial audio technology.", 
-            false);
-        
-        CreateToggle(AudioSetting.EnablePhaseAnalysis, "Enable Phase Analysis", 
-            "Use phase difference between channels to improve direction detection. Most effective with headphones.", 
-            true);
-        
-        CreateSlider(AudioSetting.MagnitudePhaseRatio, "Magnitude/Phase Balance", 
-            "Balance between magnitude-based (0) and phase-based (1) direction calculation.", 
-            0.3f, 0.0f, 1.0f);
-
-        // Main parameters
-        RegisterParameter<float>(AudioParameter.AudioDirection, "audio_direction", 
-            ParameterMode.Write, "Audio Direction", "0=left, 0.5=center, 1=right");
-        
-        RegisterParameter<float>(AudioParameter.AudioVolume, "audio_volume", 
-            ParameterMode.Write, "Audio Volume", "0=silent, 1=loud");
-        
-        RegisterParameter<bool>(AudioParameter.AudioSpike, "audio_spike", 
-            ParameterMode.Write, "Audio Spike", "True when a sudden volume increase is detected. Note: Can be inconsistent.");
-
-        // Frequency band parameters
-        RegisterParameter<float>(AudioParameter.SubBassVolume, "audio_subbass", 
-            ParameterMode.Write, "Sub Bass Volume (16-60Hz)", "Very low frequencies: bass drops, explosions, rumble");
-        
-        RegisterParameter<float>(AudioParameter.BassVolume, "audio_bass", 
-            ParameterMode.Write, "Bass Volume (60-250Hz)", "Low frequencies: bass guitar, kick drums, male vocals");
-        
-        RegisterParameter<float>(AudioParameter.LowMidVolume, "audio_lowmid", 
-            ParameterMode.Write, "Low Mid Volume (250-500Hz)", "Lower midrange: bass line melodies, lower harmonics");
-        
-        RegisterParameter<float>(AudioParameter.MidVolume, "audio_mid", 
-            ParameterMode.Write, "Mid Volume (500Hz-2kHz)", "Main vocal range, most instruments");
-        
-        RegisterParameter<float>(AudioParameter.UpperMidVolume, "audio_uppermid", 
-            ParameterMode.Write, "Upper Mid Volume (2-4kHz)", "Presence range: vocal clarity, attack sounds");
-        
-        RegisterParameter<float>(AudioParameter.PresenceVolume, "audio_presence", 
-            ParameterMode.Write, "Presence Volume (4-6kHz)", "Definition range: speech intelligibility, high harmonics");
-        
-        RegisterParameter<float>(AudioParameter.BrillianceVolume, "audio_brilliance", 
-            ParameterMode.Write, "Brilliance Volume (6-20kHz)", "Air frequencies: cymbals, sibilance, sparkle");
-
-        // Create groups
-        CreateGroup("Basic Settings", 
-            AudioSetting.PresetSelection,
-            AudioSetting.SpikeThreshold,
-            AudioSetting.EnableAGC,
-            AudioSetting.ScaleFrequencyWithVolume);
-        
-        CreateGroup("Custom Preset Settings", 
-            AudioSetting.Gain, AudioSetting.Smoothing, 
-            AudioSetting.DirectionThreshold, AudioSetting.FrequencySmoothing);
-        
-        CreateGroup("Frequency Bands", 
-            AudioSetting.EnableSubBass, AudioSetting.EnableBass, AudioSetting.EnableLowMid, 
-            AudioSetting.EnableMid, AudioSetting.EnableUpperMid, AudioSetting.EnablePresence, 
-            AudioSetting.EnableBrilliance);
-        
-        CreateGroup("Enhanced Direction", 
-            AudioSetting.EnableEnhancedDirection, 
-            AudioSetting.EnablePhaseAnalysis,
-            AudioSetting.MagnitudePhaseRatio);
+    protected override void OnPostLoad()
+    {
+        LogDebug("Module post-load completed");
     }
 
     protected override async Task<bool> OnModuleStart()
     {
         try
         {
-            UpdateConfigurationFromSettings();
-            _deviceManager = _audioFactory.CreateDeviceManager(_config, this);
+            Log("Starting OSC Audio Reaction module...");
             
-            if (!await _deviceManager.InitializeDefaultDeviceAsync())
+            // Initialize audio device manager
+            _audioDeviceManager = new SimpleAudioDeviceManager(this);
+            
+            if (!await _audioDeviceManager.InitializeDefaultDevice())
             {
-                Log("Failed to initialize audio device");
+                Log("Failed to initialize default audio device");
                 return false;
             }
 
-            _audioProcessor = _audioFactory.CreateProcessor(_config, _deviceManager.AudioCapture!.WaveFormat.BitsPerSample / 8);
-            _deviceManager.DataAvailable += OnDataAvailable;
-            
-            // Reset state
-            _currentVolume = 0f;
-            _currentDirection = 0.5f;
-            _lastVolumeUpdate = DateTime.Now;
-            _lastDirectionUpdate = DateTime.Now;
-            _configurationChanged = false;
+            // Validate audio format
+            var waveFormat = _audioDeviceManager.AudioCapture?.WaveFormat;
+            if (waveFormat == null)
+            {
+                Log("No audio wave format available after initialization");
+                return false;
+            }
 
-            // Apply initial configuration
-            ApplyConfigurationToProcessor();
+            Log($"Audio initialized: {waveFormat.SampleRate}Hz, {waveFormat.BitsPerSample}-bit, {waveFormat.Channels}ch");
+            
+            // Initialize audio processor
+            var audioSettings = GetCurrentAudioSettings();
+            _audioProcessor = new AudioProcessor(audioSettings);
+            
+            // Setup event handling
+            _audioDeviceManager.DataAvailable += OnAudioDataAvailable;
+            
+            // Reset counters and state
+            ResetModuleState();
+            
+            // Start audio capture
+            _audioDeviceManager.StartCapture();
+            
+            // Check if capture actually started
+            if (_audioDeviceManager.IsCapturing)
+            {
+                Log("OSC Audio Reaction module started successfully");
+            }
+            else
+            {
+                Log("OSC Audio Reaction module started with audio capture issues - check device availability");
+            }
             
             return true;
         }
         catch (Exception ex)
         {
-            Log($"Failed to start module: {ex.Message}");
+            Log($"Module start failed: {ex.Message}");
+            LogDebug($"Start error details: {ex}");
+            
+            await CleanupAfterError();
             return false;
         }
     }
 
     protected override Task OnModuleStop()
     {
-        // Unsubscribe from events first
-        if (_deviceManager != null)
-        {
-            _deviceManager.DataAvailable -= OnDataAvailable;
-        }
+        Log("Stopping OSC Audio Reaction module...");
         
-        // Reset parameters to default values
-        SendParameter(AudioParameter.AudioVolume, 0f);
-        SendParameter(AudioParameter.AudioDirection, 0.5f);
-        SendParameter(AudioParameter.AudioSpike, false);
+        CleanupAudioResources();
+        ResetParametersToSafeValues();
+        ClearModuleState();
         
-        // Reset frequency band parameters
-        foreach (var band in FrequencyBandInfo)
-        {
-            SendParameter(band.Parameter, 0f);
-        }
-        
-        // Dispose resources
-        _deviceManager?.Dispose();
-        _deviceManager = null;
-        
-        _audioProcessor?.Dispose();
-        _audioProcessor = null;
-        
+        Log("OSC Audio Reaction module stopped");
         return Task.CompletedTask;
     }
 
-    private void UpdateConfigurationFromSettings()
+    private async Task CleanupAfterError()
     {
-        lock (_configLock)
-        {
-            var selectedPreset = GetSettingValue<PresetSelection>(AudioSetting.PresetSelection);
-            var newConfig = selectedPreset switch
-            {
-                PresetSelection.Default => new AudioConfiguration
-                {
-                    Gain = 1.0f,
-                    Smoothing = 0.5f,
-                    DirectionThreshold = 0.01f,
-                    FrequencySmoothing = GetSettingValue<float>(AudioSetting.FrequencySmoothing),
-                    FftSize = AudioConstants.DEFAULT_FFT_SIZE,
-                    SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold)
-                },
-                PresetSelection.LowLatency => new AudioConfiguration
-                {
-                    Gain = 1.2f,
-                    Smoothing = 0.3f,
-                    DirectionThreshold = 0.01f,
-                    FrequencySmoothing = GetSettingValue<float>(AudioSetting.FrequencySmoothing),
-                    FftSize = AudioConstants.FFT_SIZE_LOW,
-                    SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold)
-                },
-                PresetSelection.VoiceOptimized => new AudioConfiguration
-                {
-                    Gain = 1.5f,
-                    Smoothing = 0.4f,
-                    DirectionThreshold = 0.02f,
-                    FrequencySmoothing = GetSettingValue<float>(AudioSetting.FrequencySmoothing),
-                    FftSize = AudioConstants.FFT_SIZE_LOW,
-                    SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold)
-                },
-                PresetSelection.HighSmoothing => new AudioConfiguration
-                {
-                    Gain = 1.0f,
-                    Smoothing = 0.8f,
-                    DirectionThreshold = 0.015f,
-                    FrequencySmoothing = GetSettingValue<float>(AudioSetting.FrequencySmoothing),
-                    FftSize = AudioConstants.FFT_SIZE_HIGH,
-                    SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold)
-                },
-                PresetSelection.MusicOptimized => new AudioConfiguration
-                {
-                    Gain = 1.1f,
-                    Smoothing = 0.5f,
-                    DirectionThreshold = 0.01f,
-                    FrequencySmoothing = GetSettingValue<float>(AudioSetting.FrequencySmoothing),
-                    FftSize = AudioConstants.FFT_SIZE_MEDIUM,
-                    SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold)
-                },
-                _ => new AudioConfiguration // Custom or default fallback
-                {
-                    Gain = GetSettingValue<float>(AudioSetting.Gain),
-                    Smoothing = GetSettingValue<float>(AudioSetting.Smoothing),
-                    DirectionThreshold = GetSettingValue<float>(AudioSetting.DirectionThreshold),
-                    FrequencySmoothing = GetSettingValue<float>(AudioSetting.FrequencySmoothing),
-                    SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold),
-                    FftSize = _config.FftSize,
-                    UpdateIntervalMs = _config.UpdateIntervalMs,
-                    PreferredDeviceId = _config.PreferredDeviceId,
-                    FrequencyBands = _config.FrequencyBands
-                }
-            };
-
-            // Apply global settings
-            newConfig = newConfig with
-            {
-                EnableAGC = GetSettingValue<bool>(AudioSetting.EnableAGC),
-                FrequencyBands = AudioConstants.DEFAULT_FREQUENCY_BANDS,
-                SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold)
-            };
-
-            if (!ConfigurationsEqual(newConfig, _config))
-            {
-                _config = newConfig;
-                _configurationChanged = true;
-            }
-        }
-    }
-
-    private bool ConfigurationsEqual(IAudioConfiguration a, IAudioConfiguration b) =>
-        a.Gain == b.Gain &&
-        a.EnableAGC == b.EnableAGC &&
-        a.Smoothing == b.Smoothing &&
-        a.DirectionThreshold == b.DirectionThreshold &&
-        a.FrequencySmoothing == b.FrequencySmoothing &&
-        a.SpikeThreshold == b.SpikeThreshold &&
-        a.FftSize == b.FftSize;
-
-    private void ApplyConfigurationToProcessor()
-    {
-        if (_audioProcessor == null) return;
-
-        lock (_configLock)
-        {
-            try
-            {
-                _audioProcessor.UpdateGain(_config.Gain);
-                _audioProcessor.UpdateSmoothing(_config.Smoothing);
-
-                // Use FrequencyBandInfo to get enabled bands
-                var enabledBands = FrequencyBandInfo
-                    .Select(band => GetSettingValue<bool>(band.Setting))
-                    .ToArray();
-                
-                _audioProcessor.ConfigureFrequencyBands(_config.FrequencySmoothing, enabledBands);
-                _configurationChanged = false;
-            }
-            catch (Exception ex)
-            {
-                Log($"Error applying configuration: {ex.Message}");
-            }
-        }
-    }
-
-    protected override void OnRegisteredParameterReceived(RegisteredParameter parameter)
-    {
-        switch ((AudioParameter)parameter.Lookup)
-        {
-            case AudioParameter.AudioDirection:
-                _currentDirection = parameter.GetValue<float>();
-                break;
-            case AudioParameter.AudioVolume:
-                _currentVolume = parameter.GetValue<float>();
-                break;
-        }
-    }
-
-    private async void OnDataAvailable(object? sender, WaveInEventArgs e)
-    {
-        if (_audioProcessor == null || !_audioProcessor.IsActive) 
-            return;
-
-        if (!await _processingLock.WaitAsync(PROCESSING_LOCK_TIMEOUT_MS))
-            return;
-
         try
         {
-            if (_configurationChanged)
-            {
-                ApplyConfigurationToProcessor();
-            }
-
-            var (bands, volume, direction, spike) = _audioProcessor.ProcessAudioData(
-                e, GetSettingValue<bool>(AudioSetting.ScaleFrequencyWithVolume));
-
-            var now = DateTime.Now;
+            LogDebug("Performing error cleanup...");
             
-            // Update volume if changed enough
-            if (ShouldUpdateParameter(volume, _currentVolume, _lastVolumeUpdate, now))
-            {
-                _currentVolume = volume;
-                SendParameter(AudioParameter.AudioVolume, volume);
-                _lastVolumeUpdate = now;
-            }
-
-            // Update direction if changed enough
-            if (ShouldUpdateParameter(direction, _currentDirection, _lastDirectionUpdate, now))
-            {
-                _currentDirection = direction;
-                SendParameter(AudioParameter.AudioDirection, direction);
-                _lastDirectionUpdate = now;
-            }
-
-            // Update frequency bands
-            if (bands.Length >= FrequencyBandInfo.Length)
-            {
-                for (int i = 0; i < FrequencyBandInfo.Length; i++)
-                {
-                    var bandInfo = FrequencyBandInfo[i];
-                    var value = GetSettingValue<bool>(bandInfo.Setting) ? Math.Min(bands[i], 1.0f) : 0f;
-                    SendParameter(bandInfo.Parameter, value);
-                }
-            }
-
-            // Update spike state
-            SendParameter(AudioParameter.AudioSpike, spike);
+            _audioDeviceManager?.StopCapture();
+            await Task.Delay(100); // Brief delay for cleanup
+            _audioDeviceManager?.Dispose();
+            _audioProcessor?.Dispose();
+            
+            LogDebug("Error cleanup completed");
         }
-        finally
+        catch (Exception cleanupEx)
         {
-            _processingLock.Release();
+            LogDebug($"Error during cleanup: {cleanupEx.Message}");
         }
     }
 
-    private bool ShouldUpdateParameter(float newValue, float currentValue, DateTime lastUpdate, DateTime now) =>
-        Math.Abs(newValue - currentValue) > 0.0001f && 
-        (now - lastUpdate).TotalMilliseconds >= _config.UpdateIntervalMs;
-
-    [ModuleUpdate(ModuleUpdateMode.Custom, true, 33)]
-    private void UpdateAudio()
+    private void CleanupAudioResources()
     {
         try
         {
-            if (_deviceManager == null || !_deviceManager.IsInitialized)
+            LogDebug("Cleaning up audio resources...");
+            
+            // Remove event handlers first
+            if (_audioDeviceManager != null)
             {
-                Log("Audio device needs initialization");
-                OnModuleStop();
-                _ = OnModuleStart();
-                return;
+                _audioDeviceManager.DataAvailable -= OnAudioDataAvailable;
             }
-
-            UpdateConfigurationFromSettings();
+            
+            // Stop capture
+            _audioDeviceManager?.StopCapture();
+            
+            // Brief delay for pending operations
+            System.Threading.Thread.Sleep(100);
+            
+            // Dispose in order: processor first, then device manager
+            _audioProcessor?.Dispose();
+            _audioProcessor = null;
+            
+            _audioDeviceManager?.Dispose();
+            _audioDeviceManager = null;
+            
+            LogDebug("Audio resources cleaned up");
         }
         catch (Exception ex)
         {
-            Log($"Error in update loop: {ex.Message}");
-        }
-    }
-
-    private void OnModuleSettingChanged(string settingId)
-    {
-        if (!Enum.TryParse<AudioSetting>(settingId, out var audioSetting))
-            return;
+            Log($"Error during cleanup: {ex.Message}");
+            LogDebug($"Cleanup error details: {ex}");
             
-        switch (audioSetting)
-        {
-            case AudioSetting.EnableEnhancedDirection:
-                if (_audioProcessor != null)
-                    _audioProcessor.EnableEnhancedDirection(GetSettingValue<bool>(AudioSetting.EnableEnhancedDirection));
-                break;
-                
-            case AudioSetting.EnablePhaseAnalysis:
-                UpdateDirectionCalculationSettings();
-                break;
+            // Force clear references
+            _audioProcessor = null;
+            _audioDeviceManager = null;
         }
-        _configurationChanged = true;
     }
 
-    private void UpdateDirectionCalculationSettings()
+    private void ResetParametersToSafeValues()
     {
-        if (_audioProcessor == null) return;
-        
-        float magnitudeWeight = 1.0f - GetSettingValue<float>(AudioSetting.MagnitudePhaseRatio);
-        bool enablePhaseAnalysis = GetSettingValue<bool>(AudioSetting.EnablePhaseAnalysis);
-        _audioProcessor.ConfigureEnhancedDirection(magnitudeWeight, enablePhaseAnalysis);
+        try
+        {
+            LogDebug("Resetting parameters to safe values...");
+            
+            // Reset main parameters
+            SendParameter(AudioParameter.AudioVolume, 0f);
+            SendParameter(AudioParameter.AudioDirection, 0.5f);
+            SendParameter(AudioParameter.AudioSpike, false);
+            
+            // Reset frequency bands
+            SendParameter(AudioParameter.SubBassVolume, 0f);
+            SendParameter(AudioParameter.BassVolume, 0f);
+            SendParameter(AudioParameter.LowMidVolume, 0f);
+            SendParameter(AudioParameter.MidVolume, 0f);
+            SendParameter(AudioParameter.UpperMidVolume, 0f);
+            SendParameter(AudioParameter.PresenceVolume, 0f);
+            SendParameter(AudioParameter.BrillianceVolume, 0f);
+            
+            LogDebug("Parameters reset to safe values");
+        }
+        catch (Exception ex)
+        {
+            Log($"Error resetting parameters: {ex.Message}");
+        }
     }
+
+    private void ClearModuleState()
+    {
+        _currentVolumeLevel = 0f;
+        _currentDirectionValue = 0.5f;
+        _deviceRecoveryAttempts = 0;
+        _totalAudioFramesProcessed = 0;
+        _lastUpdateTime = DateTime.Now;
+        _lastPerformanceLog = DateTime.Now;
+        
+        LogDebug("Module state cleared");
+    }
+
+    #endregion
+
+    #region Parameter and Settings Registration
+
+    private void RegisterAudioParameters()
+    {
+        // Main parameters
+        RegisterParameter<float>(AudioParameter.AudioDirection, "audio_direction", 
+            ParameterMode.Write, "Audio Direction", "0=left, 0.5=center, 1=right");
+        RegisterParameter<float>(AudioParameter.AudioVolume, "audio_volume", 
+            ParameterMode.Write, "Audio Volume", "0=silent, 1=loud");
+        RegisterParameter<bool>(AudioParameter.AudioSpike, "audio_spike", 
+            ParameterMode.Write, "Audio Spike", "True when sudden volume increase detected");
+
+        // Frequency band parameters
+        RegisterParameter<float>(AudioParameter.SubBassVolume, "audio_subbass", 
+            ParameterMode.Write, "Sub Bass Volume (20-60Hz)", "Deep bass frequencies");
+        RegisterParameter<float>(AudioParameter.BassVolume, "audio_bass", 
+            ParameterMode.Write, "Bass Volume (60-250Hz)", "Bass frequencies");
+        RegisterParameter<float>(AudioParameter.LowMidVolume, "audio_lowmid", 
+            ParameterMode.Write, "Low Mid Volume (250-500Hz)", "Lower midrange");
+        RegisterParameter<float>(AudioParameter.MidVolume, "audio_mid", 
+            ParameterMode.Write, "Mid Volume (500-2000Hz)", "Midrange frequencies");
+        RegisterParameter<float>(AudioParameter.UpperMidVolume, "audio_uppermid", 
+            ParameterMode.Write, "Upper Mid Volume (2000-4000Hz)", "Upper midrange");
+        RegisterParameter<float>(AudioParameter.PresenceVolume, "audio_presence", 
+            ParameterMode.Write, "Presence Volume (4000-6000Hz)", "Presence frequencies");
+        RegisterParameter<float>(AudioParameter.BrillianceVolume, "audio_brilliance", 
+            ParameterMode.Write, "Brilliance Volume (6000-25000Hz)", "High frequencies");
+    }
+
+    private void CreateAudioSettings()
+    {
+        // Preset selection
+        CreateDropdown(AudioSetting.PresetSelection, "Audio Preset", 
+            "Choose a preset configuration for different use cases", PresetSelection.Default);
+
+        // Basic settings
+        CreateSlider(AudioSetting.Gain, "Audio Gain", 
+            "Manual gain adjustment for audio input", 1.0f, 0.1f, 5.0f, 0.1f);
+        CreateToggle(AudioSetting.EnableAGC, "Automatic Gain Control", 
+            "Automatically adjust gain to maintain consistent levels", true);
+        CreateSlider(AudioSetting.Smoothing, "Volume Smoothing", 
+            "Smoothing factor for volume changes", 0.3f, 0.0f, 0.95f, 0.05f);
+        CreateSlider(AudioSetting.DirectionThreshold, "Direction Threshold", 
+            "Minimum volume for direction detection", 0.01f, 0.005f, 0.1f, 0.005f);
+
+        // Spike detection settings
+        CreateSlider(AudioSetting.SpikeThreshold, "Spike Sensitivity", 
+            "Threshold for volume spike detection (lower = more sensitive)", 2.0f, 0.5f, 5.0f, 0.1f);
+        CreateSlider(AudioSetting.SpikeHoldDuration, "Spike Hold Duration", 
+            "How long to hold spike state in seconds", 0.5f, 0.1f, 2.0f, 0.1f);
+
+        // Frequency processing
+        CreateToggle(AudioSetting.ScaleFrequencyWithVolume, "Scale Frequencies with Volume", 
+            "Scale frequency band outputs with overall volume", false);
+        CreateSlider(AudioSetting.FrequencySmoothing, "Frequency Smoothing", 
+            "Smoothing factor for frequency band analysis", 0.7f, 0.0f, 0.95f, 0.05f);
+
+        // Frequency band toggles
+        CreateToggle(AudioSetting.EnableSubBass, "Sub Bass (20-60Hz)", 
+            "Enable sub bass frequency band", true);
+        CreateToggle(AudioSetting.EnableBass, "Bass (60-250Hz)", 
+            "Enable bass frequency band", true);
+        CreateToggle(AudioSetting.EnableLowMid, "Low Mid (250-500Hz)", 
+            "Enable low mid frequency band", true);
+        CreateToggle(AudioSetting.EnableMid, "Mid (500-2000Hz)", 
+            "Enable mid frequency band", true);
+        CreateToggle(AudioSetting.EnableUpperMid, "Upper Mid (2000-4000Hz)", 
+            "Enable upper mid frequency band", true);
+        CreateToggle(AudioSetting.EnablePresence, "Presence (4000-6000Hz)", 
+            "Enable presence frequency band", true);
+        CreateToggle(AudioSetting.EnableBrilliance, "Brilliance (6000-25000Hz)", 
+            "Enable brilliance frequency band", true);
+
+        // Enhanced direction settings
+        CreateToggle(AudioSetting.EnableEnhancedDirection, "Enhanced Direction Detection", 
+            "Use advanced algorithm for more accurate audio direction detection", false);
+        CreateToggle(AudioSetting.EnablePhaseAnalysis, "Enable Phase Analysis", 
+            "Use phase difference between channels to improve direction detection", true);
+        CreateSlider(AudioSetting.MagnitudePhaseRatio, "Magnitude/Phase Balance", 
+            "Balance between magnitude-based (0) and phase-based (1) direction calculation", 0.7f, 0.0f, 1.0f, 0.05f);
+
+        // Directional pause settings
+        CreateToggle(AudioSetting.EnableDirectionalPause, "Enable Directional Pause", 
+            "Audio direction pauses longer when further from center", false);
+        CreateSlider(AudioSetting.DirectionalPauseFactor, "Directional Pause Factor", 
+            "How much longer to pause at extreme directions", 1.0f, 0.1f, 5.0f, 0.1f);
+
+        // Habituation settings
+        CreateToggle(AudioSetting.EnableHabituation, "Enable Smart Spike Detection", 
+            "Use habituation to ignore repetitive spikes while staying responsive to new ones", true);
+        CreateSlider(AudioSetting.HabituationIncrease, "Habituation Learning Rate", 
+            "How quickly the system adapts to repetitive spikes", 0.15f, 0.05f, 0.5f, 0.05f);
+        CreateSlider(AudioSetting.HabituationDecayRate, "Habituation Recovery Rate", 
+            "How quickly sensitivity returns during quiet periods", 0.02f, 0.005f, 0.1f, 0.005f);
+        CreateSlider(AudioSetting.HabituationThreshold, "Habituation Threshold", 
+            "Above this level, spikes are ignored as expected", 0.3f, 0.1f, 0.8f, 0.1f);
+    }
+
+    private void CreateAudioSettingsGroups()
+    {
+        CreateGroup("Basic Settings", "Core audio processing settings", 
+            AudioSetting.PresetSelection, AudioSetting.Gain, AudioSetting.EnableAGC, 
+            AudioSetting.Smoothing, AudioSetting.DirectionThreshold);
+        
+        CreateGroup("Spike Detection", "Volume spike detection settings", 
+            AudioSetting.SpikeThreshold, AudioSetting.SpikeHoldDuration);
+        
+        CreateGroup("Frequency Bands", "Individual frequency band controls", 
+            AudioSetting.ScaleFrequencyWithVolume, AudioSetting.FrequencySmoothing,
+            AudioSetting.EnableSubBass, AudioSetting.EnableBass, AudioSetting.EnableLowMid, 
+            AudioSetting.EnableMid, AudioSetting.EnableUpperMid, AudioSetting.EnablePresence, 
+            AudioSetting.EnableBrilliance);
+        
+        CreateGroup("Enhanced Direction", "Advanced directional audio features", 
+            AudioSetting.EnableEnhancedDirection, AudioSetting.EnablePhaseAnalysis, 
+            AudioSetting.MagnitudePhaseRatio, AudioSetting.EnableDirectionalPause, 
+            AudioSetting.DirectionalPauseFactor);
+        
+        CreateGroup("Smart Spike Detection", "Habituation-based spike detection", 
+            AudioSetting.EnableHabituation, AudioSetting.HabituationIncrease, 
+            AudioSetting.HabituationDecayRate, AudioSetting.HabituationThreshold);
+    }
+
+    #endregion
+
+    #region Audio Processing
+
+    private void OnAudioDataAvailable(object? sender, WaveInEventArgs e)
+    {
+        try
+        {
+            if (_audioProcessor == null)
+                return;
+
+            var result = _audioProcessor.ProcessAudio(e);
+            UpdateAudioParameters(result);
+            
+            // Update state and counters
+            _currentVolumeLevel = result.Volume;
+            _currentDirectionValue = result.Direction;
+            _lastUpdateTime = DateTime.Now;
+            _totalAudioFramesProcessed++;
+            
+            // Log performance metrics occasionally (every 1000 frames)
+            if (_totalAudioFramesProcessed % 1000 == 0)
+            {
+                var timeSinceLastLog = DateTime.Now - _lastPerformanceLog;
+                if (timeSinceLastLog.TotalSeconds >= 30) // Log every 30 seconds max
+                {
+                    var fps = 1000 / timeSinceLastLog.TotalSeconds;
+                    LogDebug($"Audio processing: {fps:F1} FPS, Volume: {result.Volume:F3}, Direction: {result.Direction:F3}");
+                    _lastPerformanceLog = DateTime.Now;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Audio processing error: {ex.Message}");
+            
+            // Attempt recovery with exponential backoff
+            _deviceRecoveryAttempts++;
+            if (_deviceRecoveryAttempts < 3)
+            {
+                Log($"Attempting audio device recovery (attempt {_deviceRecoveryAttempts}/3)...");
+                Task.Run(async () => await AttemptDeviceRecovery());
+            }
+            else if (_deviceRecoveryAttempts == 3)
+            {
+                Log("Maximum recovery attempts reached. Audio processing may be unstable.");
+            }
+        }
+    }
+
+    private void UpdateAudioParameters(AudioProcessingResult result)
+    {
+        // Send main parameters
+        SendParameter(AudioParameter.AudioVolume, RoundToSignificantDigits(result.Volume, 4));
+        SendParameter(AudioParameter.AudioDirection, RoundToSignificantDigits(result.Direction, 4));
+        SendParameter(AudioParameter.AudioSpike, result.Spike);
+        
+        // Send frequency band parameters if enabled
+        if (result.FrequencyBands.Length >= 7)
+        {
+            if (GetSettingValue<bool>(AudioSetting.EnableSubBass))
+                SendParameter(AudioParameter.SubBassVolume, RoundToSignificantDigits(result.FrequencyBands[0], 4));
+            if (GetSettingValue<bool>(AudioSetting.EnableBass))
+                SendParameter(AudioParameter.BassVolume, RoundToSignificantDigits(result.FrequencyBands[1], 4));
+            if (GetSettingValue<bool>(AudioSetting.EnableLowMid))
+                SendParameter(AudioParameter.LowMidVolume, RoundToSignificantDigits(result.FrequencyBands[2], 4));
+            if (GetSettingValue<bool>(AudioSetting.EnableMid))
+                SendParameter(AudioParameter.MidVolume, RoundToSignificantDigits(result.FrequencyBands[3], 4));
+            if (GetSettingValue<bool>(AudioSetting.EnableUpperMid))
+                SendParameter(AudioParameter.UpperMidVolume, RoundToSignificantDigits(result.FrequencyBands[4], 4));
+            if (GetSettingValue<bool>(AudioSetting.EnablePresence))
+                SendParameter(AudioParameter.PresenceVolume, RoundToSignificantDigits(result.FrequencyBands[5], 4));
+            if (GetSettingValue<bool>(AudioSetting.EnableBrilliance))
+                SendParameter(AudioParameter.BrillianceVolume, RoundToSignificantDigits(result.FrequencyBands[6], 4));
+        }
+    }
+
+    private static float RoundToSignificantDigits(float value, int significantDigits)
+    {
+        if (value == 0f || float.IsNaN(value) || float.IsInfinity(value))
+            return value;
+
+        // Clamp extremely small values to prevent scientific notation
+        const float MIN_THRESHOLD = 1e-4f;
+        if (Math.Abs(value) < MIN_THRESHOLD)
+            return 0f;
+
+        int magnitude = (int)Math.Floor(Math.Log10(Math.Abs(value)));
+        double scale = Math.Pow(10, significantDigits - magnitude - 1);
+        float rounded = (float)(Math.Round(value * scale) / scale);
+        
+        return Math.Abs(rounded) < MIN_THRESHOLD ? 0f : rounded;
+    }
+
+    #endregion
+
+    #region Configuration Management
+
+    private AudioSettings GetCurrentAudioSettings()
+    {
+        var preset = GetSettingValue<PresetSelection>(AudioSetting.PresetSelection);
+        
+        return preset switch
+        {
+            PresetSelection.LowLatency => new AudioSettings
+            {
+                Gain = 1.0f,
+                EnableAGC = true,
+                Smoothing = 0.2f,
+                DirectionThreshold = 0.01f,
+                SpikeThreshold = 2.0f,
+                SpikeHoldDuration = 0.3f,
+                FrequencySmoothing = 0.5f,
+                EnableEnhancedDirection = false,
+                EnableHabituation = true,
+                HabituationIncrease = 0.2,
+                HabituationDecayRate = 0.03,
+                HabituationThreshold = 0.3,
+                ScaleFrequencyWithVolume = false,
+                EnableSubBass = true,
+                EnableBass = true,
+                EnableLowMid = true,
+                EnableMid = true,
+                EnableUpperMid = true,
+                EnablePresence = true,
+                EnableBrilliance = true
+            },
+            PresetSelection.VoiceOptimized => new AudioSettings
+            {
+                Gain = 1.2f,
+                EnableAGC = true,
+                Smoothing = 0.4f,
+                DirectionThreshold = 0.02f,
+                SpikeThreshold = 1.8f,
+                SpikeHoldDuration = 0.4f,
+                FrequencySmoothing = 0.6f,
+                EnableEnhancedDirection = true,
+                EnableHabituation = true,
+                HabituationIncrease = 0.1,
+                HabituationDecayRate = 0.015,
+                HabituationThreshold = 0.4,
+                ScaleFrequencyWithVolume = false,
+                EnableSubBass = false,
+                EnableBass = true,
+                EnableLowMid = true,
+                EnableMid = true,
+                EnableUpperMid = true,
+                EnablePresence = true,
+                EnableBrilliance = false
+            },
+            PresetSelection.HighSmoothing => new AudioSettings
+            {
+                Gain = 1.0f,
+                EnableAGC = true,
+                Smoothing = 0.8f,
+                DirectionThreshold = 0.01f,
+                SpikeThreshold = 2.5f,
+                SpikeHoldDuration = 0.8f,
+                FrequencySmoothing = 0.9f,
+                EnableEnhancedDirection = false,
+                EnableHabituation = true,
+                HabituationIncrease = 0.1,
+                HabituationDecayRate = 0.01,
+                HabituationThreshold = 0.5,
+                ScaleFrequencyWithVolume = false,
+                EnableSubBass = true,
+                EnableBass = true,
+                EnableLowMid = true,
+                EnableMid = true,
+                EnableUpperMid = true,
+                EnablePresence = true,
+                EnableBrilliance = true
+            },
+            PresetSelection.MusicOptimized => new AudioSettings
+            {
+                Gain = 1.1f,
+                EnableAGC = true,
+                Smoothing = 0.5f,
+                DirectionThreshold = 0.015f,
+                SpikeThreshold = 2.2f,
+                SpikeHoldDuration = 0.6f,
+                FrequencySmoothing = 0.7f,
+                EnableEnhancedDirection = true,
+                EnableHabituation = true,
+                HabituationIncrease = 0.12,
+                HabituationDecayRate = 0.02,
+                HabituationThreshold = 0.35,
+                ScaleFrequencyWithVolume = true,
+                EnableSubBass = true,
+                EnableBass = true,
+                EnableLowMid = true,
+                EnableMid = true,
+                EnableUpperMid = true,
+                EnablePresence = true,
+                EnableBrilliance = true
+            },
+            PresetSelection.Custom => new AudioSettings
+            {
+                Gain = GetSettingValue<float>(AudioSetting.Gain),
+                EnableAGC = GetSettingValue<bool>(AudioSetting.EnableAGC),
+                Smoothing = GetSettingValue<float>(AudioSetting.Smoothing),
+                DirectionThreshold = GetSettingValue<float>(AudioSetting.DirectionThreshold),
+                SpikeThreshold = GetSettingValue<float>(AudioSetting.SpikeThreshold),
+                SpikeHoldDuration = GetSettingValue<float>(AudioSetting.SpikeHoldDuration),
+                FrequencySmoothing = GetSettingValue<float>(AudioSetting.FrequencySmoothing),
+                EnableEnhancedDirection = GetSettingValue<bool>(AudioSetting.EnableEnhancedDirection),
+                MagnitudePhaseRatio = GetSettingValue<float>(AudioSetting.MagnitudePhaseRatio),
+                EnablePhaseAnalysis = GetSettingValue<bool>(AudioSetting.EnablePhaseAnalysis),
+                EnableDirectionalPause = GetSettingValue<bool>(AudioSetting.EnableDirectionalPause),
+                DirectionalPauseFactor = GetSettingValue<float>(AudioSetting.DirectionalPauseFactor),
+                EnableHabituation = GetSettingValue<bool>(AudioSetting.EnableHabituation),
+                HabituationIncrease = GetSettingValue<float>(AudioSetting.HabituationIncrease),
+                HabituationDecayRate = GetSettingValue<float>(AudioSetting.HabituationDecayRate),
+                HabituationThreshold = GetSettingValue<float>(AudioSetting.HabituationThreshold),
+                ScaleFrequencyWithVolume = GetSettingValue<bool>(AudioSetting.ScaleFrequencyWithVolume),
+                EnableSubBass = GetSettingValue<bool>(AudioSetting.EnableSubBass),
+                EnableBass = GetSettingValue<bool>(AudioSetting.EnableBass),
+                EnableLowMid = GetSettingValue<bool>(AudioSetting.EnableLowMid),
+                EnableMid = GetSettingValue<bool>(AudioSetting.EnableMid),
+                EnableUpperMid = GetSettingValue<bool>(AudioSetting.EnableUpperMid),
+                EnablePresence = GetSettingValue<bool>(AudioSetting.EnablePresence),
+                EnableBrilliance = GetSettingValue<bool>(AudioSetting.EnableBrilliance)
+            },
+            _ => new AudioSettings()
+        };
+    }
+
+    #endregion
+
+    #region Helper Methods
+
+    private void ResetModuleState()
+    {
+        _currentVolumeLevel = 0f;
+        _currentDirectionValue = 0.5f;
+        _deviceRecoveryAttempts = 0;
+        _totalAudioFramesProcessed = 0;
+        _lastUpdateTime = DateTime.Now;
+        _lastPerformanceLog = DateTime.Now;
+    }
+
+    private async Task AttemptDeviceRecovery()
+    {
+        try
+        {
+            LogDebug("Attempting audio device recovery...");
+            
+            _audioDeviceManager?.StopCapture();
+            await Task.Delay(1000);
+            
+            var deviceName = _audioDeviceManager?.CurrentDeviceName ?? "Unknown";
+            if (await _audioDeviceManager?.InitializeDefaultDevice() == true)
+            {
+                _audioDeviceManager.StartCapture();
+                _deviceRecoveryAttempts = 0;
+                Log($"Audio device recovery successful: {deviceName}");
+            }
+            else
+            {
+                Log($"Audio device recovery failed: {deviceName}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Device recovery error: {ex.Message}");
+            LogDebug($"Recovery error details: {ex}");
+        }
+    }
+
+    #endregion
 } 

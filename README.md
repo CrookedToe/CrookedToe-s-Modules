@@ -12,10 +12,9 @@ Captures your system's audio output and sends stereo direction and volume inform
 
 ## Installation
 
-1. Download the latest release from the releases page
-2. Place the module DLLs in your VRCOSC modules folder (typically `%AppData%/VRCOSC/Packages/local`)
-3. Enable the desired modules in VRCOSC
-4. Configure each module's settings as needed
+1. enable CrookedToe's Modules in the packages
+2. Enable the desired modules in VRCOSC
+3. Configure each module's settings as needed
 
 ## Development
 
