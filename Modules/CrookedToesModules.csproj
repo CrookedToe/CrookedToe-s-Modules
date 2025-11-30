@@ -2,7 +2,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -19,7 +19,7 @@
 
   <ItemGroup>
     <PackageReference Include="NWaves" Version="0.9.6" GeneratePathProperty="true" />
-    <PackageReference Include="VolcanicArts.VRCOSC.SDK" Version="2025.327.0" />
+    <PackageReference Include="VolcanicArts.VRCOSC.SDK" Version="2025.1120.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
 

@@ -11,9 +11,9 @@ Speacial thanks to [Wikipedia](https://en.wikipedia.org/wiki/Fast_Fourier_transf
   - Smoothly returns to center when audio is below threshold
   - Only considers enabled frequency bands in direction calculation
 - **Volume Level Detection**: Measures the overall volume level (0 = silent, 1 = loud)
-- **Volume Spike Detection**: Detects sudden increases in volume
-  - Configurable sensitivity threshold
-  - Note: Can be finnicky and may not detect all spikes consistently
+- **Volume Spike Detection**: Detects sudden increases in volume using habituation
+  - Configurable sensitivity threshold and hold duration
+  - Habituation-based: repetitive spikes are gradually ignored, new spikes still detected
   - Works best with clear, sharp volume changes
   - May need adjustment based on your audio source and preferences
 - **Automatic Gain Control**: Dynamically adjusts gain to maintain consistent volume levels
@@ -25,17 +25,10 @@ Speacial thanks to [Wikipedia](https://en.wikipedia.org/wiki/Fast_Fourier_transf
   - Each band provides independent intensity values (0-1)
   - Bands are normalized relative to total power of enabled bands
   - Disabled bands output 0
-- **Avatar-Focused Presets**:
-  - Default: Balanced settings (FFT: 8192, Smoothing: 0.5)
-  - Low Latency: Quick response (FFT: 4096, Smoothing: 0.3)
-  - Voice Optimized: Speech focused (FFT: 4096, Smoothing: 0.4)
-  - High Smoothing: Stable reactions (FFT: 16384, Smoothing: 0.8)
-  - Music Optimized: Balanced for music (FFT: 8192, Smoothing: 0.5)
-- **Adaptive Processing**:
-  - Automatic FFT size adjustment based on buffer size
-  - Minimum FFT size: 4096
-  - Maximum FFT size: Based on preset
-  - Buffer underrun detection and logging
+- **Processing Model**:
+  - Fixed FFT size of 8192 samples (trades latency for good frequency resolution)
+  - Single configurable profile driven entirely by the module settings (no preset dropdown)
+  - Occasional performance logging for diagnostics
 
 ## Parameters
 
@@ -73,57 +66,32 @@ Note:
 - Each band's power is calculated using proper frequency bin analysis and magnitude-squared values
 - Bands use exponential smoothing for stable transitions
 
-## Avatar Presets
+## Recommended Settings
 
-Current preset configurations:
+There is a single configuration profile controlled by the module settings. Some recommended starting points:
 
-1. **Default**
-   - FFT Size: 8192 (~5.86Hz resolution)
-   - Gain: 1.0
-   - Smoothing: 0.5
-   - Direction Threshold: 0.01
-   - Frequency Smoothing: 0.7
-   - AGC: Enabled
+- **Balanced (default-like)**
+  - Gain: 1.0
+  - Smoothing: 0.3–0.5
+  - Direction Threshold: 0.01
+  - Frequency Smoothing: 0.7
+  - AGC: Enabled
 
-2. **Low Latency**
-   - FFT Size: 4096 (~11.7Hz resolution)
-   - Gain: 1.2
-   - Smoothing: 0.3
-   - Direction Threshold: 0.01
-   - Frequency Smoothing: 0.7
-   - AGC: Enabled
+- **Low Latency (more responsive)**
+  - Slightly lower Smoothing (e.g. 0.2–0.3)
+  - Slightly lower Frequency Smoothing if you want bands to react faster
 
-3. **Voice Optimized**
-   - FFT Size: 4096 (~11.7Hz resolution)
-   - Gain: 1.5
-   - Smoothing: 0.4
-   - Direction Threshold: 0.02
-   - Frequency Smoothing: 0.7
-   - AGC: Enabled
+- **High Smoothing (very stable)**
+  - Higher Smoothing (e.g. 0.7–0.9)
+  - Higher Frequency Smoothing
 
-4. **High Smoothing**
-   - FFT Size: 16384 (~2.93Hz resolution)
-   - Gain: 1.0
-   - Smoothing: 0.8
-   - Direction Threshold: 0.015
-   - Frequency Smoothing: 0.7
-   - AGC: Enabled
-
-5. **Music Optimized**
-   - FFT Size: 8192 (~5.86Hz resolution)
-   - Gain: 1.1
-   - Smoothing: 0.5
-   - Direction Threshold: 0.01
-   - Frequency Smoothing: 0.7
-   - AGC: Enabled
-
-Note: FFT resolution values indicate the frequency spacing between bins. Lower values mean better frequency resolution but higher latency.
+Note: Internally the module uses a fixed FFT size of 8192 samples; responsiveness is mainly controlled via smoothing and other settings rather than changing FFT size.
 
 ## Technical Details
 
 - Uses NAudio's `WasapiLoopbackCapture` for system audio capture
-- 48kHz sample rate, 32-bit float stereo format
-- Fixed FFT sizes based on preset (4096, 8192, or 16384 samples)
+- Uses the device's output sample rate (typically 48kHz), 32-bit float stereo format
+- Fixed FFT size of 8192 samples for all presets
 - Hamming window applied to audio samples
 - Direction calculation:
   - Per-band direction weighted by band power
@@ -169,15 +137,14 @@ Note: FFT resolution values indicate the frequency spacing between bins. Lower v
   - Manual gain range: 0.1 to 5.0
   - RMS-based volume calculation
 - **Spike Detection Issues**:
-  - Try adjusting the Spike Sensitivity
-  - Note that detection can be inconsistent
+  - Try adjusting the Spike Sensitivity and Spike Habituation settings
+  - Habituation reduces repeated triggering on the same sound; lower the Habituation Threshold or Learning Rate if spikes stop appearing
   - Works best with sharp volume changes
   - May miss some spikes or trigger unexpectedly
   - Consider your use case - lower threshold for subtle changes, higher for dramatic ones
-- **Performance Issues**:
-  - Adaptive FFT size
-  - Buffer underrun detection
-  - Efficient memory management
+- **Performance Notes**:
+  - Fixed FFT size for predictable performance
+  - Efficient memory management and occasional performance logging
 
 ## Requirements
 

@@ -10,7 +10,7 @@
     </p>
 </div>
 
-This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/ZenithVal/OSCLeash), rewritten in C# to work within VRCOSC's module system. This version features optimized low-latency response for immediate grab detection and movement, running at 60Hz with automatic performance scaling. For detailed information about the original implementation, advanced features, and troubleshooting, please visit the original repository.
+This is a VRCOSC module port of [ZenithVal's OSCLeash](https://github.com/ZenithVal/OSCLeash), rewritten in C# to work within VRCOSC's module system. This version features optimized low-latency response for immediate grab detection and movement, running at 120Hz with automatic performance scaling. For detailed information about the original implementation, advanced features, and troubleshooting, please visit the original repository.
 
 > ⚠️ **WARNING**: This project is currently a Work In Progress. Features may be incomplete, unstable, or subject to significant changes. Use at your own risk and please report any issues you encounter.
 
@@ -87,8 +87,8 @@ The leash direction is set in the module settings:
 ## Up/Down Control Settings
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Up/Down Compensation | Compensation for vertical movement | 1.0 |
-| Up/Down Deadzone | Vertical angle deadzone | 0.5 |
+| Up/Down Compensation | Compensation factor that reduces horizontal movement when you pull vertically | 0.5 |
+| Up/Down Deadzone | Minimum vertical pull (0–1) before horizontal movement starts being reduced | 0.5 |
 
 ## Vertical Movement Settings
 | Setting | Description | Default |
@@ -100,13 +100,27 @@ The leash direction is set in the module settings:
 | Vertical Smoothing | Smoothing factor for height changes (0-1) | 0.8 |
 | Vertical Angle | Required angle from horizontal (15-75°) | 45° |
 
+### Advanced Gravity Settings
+
+| Setting          | Description                                                   | Default |
+|------------------|---------------------------------------------------------------|---------|
+| Gravity Strength | Acceleration applied when returning to the reference height  | 9.81    |
+| Terminal Velocity| Maximum vertical falling speed                                | 15.0    |
+
 ## Turning Settings
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Turning Enabled | Enable turning control | false |
 | Turning Multiplier | Turning speed multiplier | 0.80 |
 | Turning Deadzone | Minimum stretch for turning | 0.15 |
-| Turning Goal | Maximum turning angle in degrees | 90° |
+| Turning Goal | **Minimum angle from straight-forward pull** required before turning is applied (0–90°) | 20° |
+
+Turning behaviour:
+
+- With a **front-facing leash (North)**, pulling the leash **to the avatar's right** turns them right, and **to the left** turns them left.
+- With a **back-facing leash (South)**, the perspective is reversed so left/right pulls produce mirrored turns.
+- With a **right-facing leash (East)**, pulling the leash towards the avatar's **left** turns them left; with a **left-facing leash (West)**, pulling it towards their **right** turns them right.
+- Turning only starts once your pull direction is at least `Turning Goal` degrees away from straight-forward for the chosen leash direction.
 
 
 # Troubleshooting

@@ -1,120 +1,171 @@
-using System.Numerics;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using NAudio.Wave;
 using NWaves.Transforms;
 using NWaves.Windows;
-using NWaves.Signals;
 
 namespace CrookedToe.Modules.OSCAudioReaction;
 
-/// <summary>
-/// Audio processor that handles FFT analysis, direction detection, and frequency band processing
-/// </summary>
+public record AudioSettings
+{
+    public int SampleRate { get; init; } = 48000;
+    public float Gain { get; init; } = 1.0f;
+    public bool EnableAGC { get; init; } = true;
+    public float Smoothing { get; init; } = 0.3f;
+    public float DirectionThreshold { get; init; } = 0.01f;
+    public float SpikeThreshold { get; init; } = 2.0f;
+    public float SpikeHoldDuration { get; init; } = 0.5f;
+    public float FrequencySmoothing { get; init; } = 0.7f;
+    public float MagnitudePhaseRatio { get; init; } = 0.7f;
+    public bool EnablePhaseAnalysis { get; init; } = true;
+    public bool EnableDirectionalPause { get; init; }
+    public float DirectionalPauseFactor { get; init; } = 1.0f;
+    public double HabituationIncrease { get; init; } = 0.15;
+    public double HabituationDecayRate { get; init; } = 0.02;
+    public double HabituationThreshold { get; init; } = 0.3;
+    public bool ScaleFrequencyWithVolume { get; init; }
+    public bool[] BandEnabled { get; init; } = [true, true, true, true, true, true, true];
+    
+    public bool EnableSubBass => BandEnabled[0];
+    public bool EnableBass => BandEnabled[1];
+    public bool EnableLowMid => BandEnabled[2];
+    public bool EnableMid => BandEnabled[3];
+    public bool EnableUpperMid => BandEnabled[4];
+    public bool EnablePresence => BandEnabled[5];
+    public bool EnableBrilliance => BandEnabled[6];
+}
+
+public sealed class AudioProcessingResult
+{
+    public float Volume { get; set; }
+    public float Direction { get; set; } = 0.5f;
+    public float[] FrequencyBands { get; } = new float[7];
+    public bool Spike { get; set; }
+    
+    public void Reset()
+    {
+        Volume = 0f;
+        Direction = 0.5f;
+        Array.Clear(FrequencyBands);
+        Spike = false;
+    }
+    
+    public static AudioProcessingResult Empty { get; } = new();
+}
+
 public sealed class AudioProcessor : IDisposable
 {
-    #region Private Fields
+    private static readonly (float Low, float High)[] FrequencyBandRanges =
+    [
+        (20f, 60f), (60f, 250f), (250f, 500f), (500f, 2000f),
+        (2000f, 4000f), (4000f, 6000f), (6000f, 20000f)
+    ];
 
-    private readonly AudioSettings _settings;
+    private static readonly float[] FrequencyBandWeights = [0.8f, 1.0f, 1.2f, 1.5f, 1.3f, 1.1f, 0.9f];
+
+    private const int FFT_SIZE = 8192;
+    private const int SPECTRUM_SIZE = FFT_SIZE / 2 + 1;
+    private const int MIN_SAMPLES = 128;
+    private const float MIN_VOLUME_THRESHOLD = 0.001f;
+    private const float NOISE_FLOOR = 1e-5f;
+
+    private AudioSettings _settings;
     private readonly SpikeDetector _spikeDetector;
-    private readonly FrequencyBandProcessor _frequencyProcessor;
     private readonly object _processingLock = new();
-    private readonly object _fftLock = new();
     private volatile bool _disposed;
 
-    // Audio state
     private float _currentVolume;
     private float _currentDirection = 0.5f;
     private float _currentGain;
     private float _currentRms;
 
-    // FFT processing components
-    private RealFft _fft;
-    private float[] _fftBuffer;
-    private Complex[] _spectrum;
-    private float[] _window;
-    private int _fftSize;
+    private readonly RealFft _fft;
+    private readonly float[] _window;
+    
+    private readonly float[] _leftSamples;
+    private readonly float[] _rightSamples;
+    private readonly float[] _monoSamples;
+    private readonly float[] _fftBuffer;
+    private readonly float[] _realSpectrum;
+    private readonly float[] _imagSpectrum;
+    private readonly float[] _leftMagnitudes;
+    private readonly float[] _rightMagnitudes;
+    private readonly float[] _monoMagnitudes;
+    
+    private (int Start, int End)[] _bandBinRanges = new (int, int)[7];
+    private float _cachedBinWidth;
 
-    // Enhanced direction processing
-    private bool _enhancedDirectionEnabled;
-    private float _magnitudeWeight = 0.7f;
-    private bool _enablePhaseAnalysis = true;
-
-    // Volume history for smoothing
-    private readonly Queue<float> _volumeHistory = new(3);
-    private readonly Queue<float> _directionHistory = new(3);
-    private readonly Queue<float> _recentVolumes = new(3);
-
-    // Frequency band smoothing state
-    private float[] _smoothedFrequencyBands = new float[7];
-
-    // Directional pause state
-    private DateTime _lastDirectionUpdate = DateTime.Now;
-    private float _directionPauseMultiplier = 1.0f;
-
-    // Performance tracking
-    private int _processedFrames = 0;
-    private DateTime _lastPerformanceLog = DateTime.Now;
-
-    #endregion
-
-    #region Constructor
+    private readonly float[] _smoothedFrequencyBands = new float[7];
+    private readonly AudioProcessingResult _result = new();
 
     public AudioProcessor(AudioSettings settings)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _currentGain = settings.Gain;
-        _fftSize = 8192;
         
-        InitializeFFTComponents();
+        _fft = new RealFft(FFT_SIZE);
+        _window = Window.Blackman(FFT_SIZE);
         _spikeDetector = new SpikeDetector(settings);
-        _frequencyProcessor = new FrequencyBandProcessor(settings);
-
-        // Configure enhanced direction processing
-        _enhancedDirectionEnabled = settings.EnableEnhancedDirection;
-        _magnitudeWeight = settings.MagnitudePhaseRatio;
-        _enablePhaseAnalysis = settings.EnablePhaseAnalysis;
+        
+        _leftSamples = new float[FFT_SIZE];
+        _rightSamples = new float[FFT_SIZE];
+        _monoSamples = new float[FFT_SIZE];
+        _fftBuffer = new float[FFT_SIZE];
+        _realSpectrum = new float[FFT_SIZE];
+        _imagSpectrum = new float[FFT_SIZE];
+        _leftMagnitudes = new float[SPECTRUM_SIZE];
+        _rightMagnitudes = new float[SPECTRUM_SIZE];
+        _monoMagnitudes = new float[SPECTRUM_SIZE];
+        
+        UpdateBinRanges();
     }
 
-    private void InitializeFFTComponents()
+    private void UpdateBinRanges()
     {
-        _fft = new RealFft(_fftSize);
-        _fftBuffer = new float[_fftSize];
-        _spectrum = new Complex[_fftSize / 2 + 1];
-        _window = Window.Hamming(_fftSize);
+        float binWidth = _settings.SampleRate / (float)FFT_SIZE;
+        _cachedBinWidth = binWidth;
+        
+        for (int band = 0; band < 7; band++)
+        {
+            var (low, high) = FrequencyBandRanges[band];
+            int startBin = Math.Max(1, (int)MathF.Round(low / binWidth));
+            int endBin = Math.Min(SPECTRUM_SIZE - 1, (int)MathF.Round(high / binWidth) - 1);
+            
+            if (endBin < startBin) endBin = startBin;
+            _bandBinRanges[band] = (startBin, endBin);
+        }
     }
-
-    #endregion
-
-    #region Properties
 
     public float CurrentVolume => _currentVolume;
     public float CurrentDirection => _currentDirection;
     public float CurrentGain => _currentGain;
     public float CurrentRms => _currentRms;
-    public bool IsActive => _currentVolume > 0.001f;
+    public bool IsActive => _currentVolume > MIN_VOLUME_THRESHOLD;
 
-    #endregion
-
-    #region Configuration Methods
-
-    public void UpdateGain(float gain)
+    public void UpdateSettings(AudioSettings newSettings)
     {
-        _currentGain = Math.Clamp(gain, 0.1f, 5.0f);
+        ArgumentNullException.ThrowIfNull(newSettings);
+        
+        lock (_processingLock)
+        {
+            if (_settings.SampleRate != newSettings.SampleRate)
+            {
+                _settings = newSettings;
+                UpdateBinRanges();
+            }
+            else
+            {
+                _settings = newSettings;
+            }
+            
+            _spikeDetector.UpdateSettings(newSettings);
+            
+            if (!newSettings.EnableAGC)
+                _currentGain = newSettings.Gain;
+        }
     }
 
-    public void EnableEnhancedDirection(bool enabled)
-    {
-        _enhancedDirectionEnabled = enabled;
-    }
-
-    public void ConfigureEnhancedDirection(float magnitudeWeight, bool enablePhaseAnalysis)
-    {
-        _magnitudeWeight = Math.Clamp(magnitudeWeight, 0.0f, 1.0f);
-        _enablePhaseAnalysis = enablePhaseAnalysis;
-    }
-
-    #endregion
-
-    #region Audio Processing
+    public void UpdateGain(float gain) => _currentGain = Math.Clamp(gain, 0.1f, 5.0f);
 
     public AudioProcessingResult ProcessAudio(WaveInEventArgs e)
     {
@@ -123,343 +174,172 @@ public sealed class AudioProcessor : IDisposable
 
         lock (_processingLock)
         {
-            try
-            {
-                var result = ProcessAudioInternal(e);
-                
-                // Track performance metrics
-                _processedFrames++;
-                if (_processedFrames % 500 == 0)
-                {
-                    LogPerformanceMetrics();
-                }
-                
-                return result;
-            }
-            catch (Exception ex)
-            {
-                LogError($"Audio processing failed: {ex.Message}");
+            if (_disposed)
                 return AudioProcessingResult.Empty;
-            }
+            
+            return ProcessAudioInternal(e);
         }
     }
 
     private AudioProcessingResult ProcessAudioInternal(WaveInEventArgs e)
     {
         int samplesAvailable = e.BytesRecorded / 4;
-        if (samplesAvailable < 128)
+        if (samplesAvailable < MIN_SAMPLES)
             return AudioProcessingResult.Empty;
 
-        AdaptFftSize(samplesAvailable);
+        int sampleCount = ExtractSamplesOptimized(e.Buffer, samplesAvailable);
         
-        var (leftSamples, rightSamples, monoSamples) = ExtractSamples(e, samplesAvailable);
-        
-        // Process FFT for each channel
-        var leftSpectrum = ProcessSpectrum(leftSamples);
-        var rightSpectrum = ProcessSpectrum(rightSamples);
-        var monoSpectrum = ProcessSpectrum(monoSamples);
+        ProcessSpectrumOptimized(_leftSamples, sampleCount, _leftMagnitudes);
+        ProcessSpectrumOptimized(_rightSamples, sampleCount, _rightMagnitudes);
+        ProcessSpectrumOptimized(_monoSamples, sampleCount, _monoMagnitudes);
 
-        // Calculate audio metrics
-        float rawVolume = CalculateVolume(monoSamples);
-        float direction = CalculateDirection(leftSpectrum, rightSpectrum, rawVolume);
-        var bands = ProcessFrequencyBands(monoSpectrum, _settings.ScaleFrequencyWithVolume);
+        float rawVolume = CalculateVolumeOptimized(_monoSamples, sampleCount, _monoMagnitudes);
+        float rawDirection = CalculateDirectionOptimized(_leftMagnitudes, _rightMagnitudes, rawVolume);
+        ProcessFrequencyBandsOptimized(_monoMagnitudes, _settings.ScaleFrequencyWithVolume);
         bool spike = _spikeDetector.DetectSpike(rawVolume);
 
-        // Apply gain control
         ApplyGainControl(rawVolume);
-
-        // Apply gain and soft clipping
         float volume = ApplyGainAndClipping(rawVolume);
-        
-        UpdateState(volume, direction);
+        UpdateState(volume, rawDirection);
 
-        return new AudioProcessingResult
-        {
-            Volume = volume,
-            Direction = direction,
-            FrequencyBands = bands,
-            Spike = spike
-        };
+        _result.Volume = _currentVolume;
+        _result.Direction = _currentDirection;
+        _result.Spike = spike;
+        
+        return _result;
     }
 
-    private (float[] left, float[] right, float[] mono) ExtractSamples(WaveInEventArgs e, int samplesAvailable)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int ExtractSamplesOptimized(byte[] buffer, int samplesAvailable)
     {
-        int sampleCount = Math.Min(samplesAvailable / 2, _fftSize);
-        var leftSamples = new float[_fftSize];
-        var rightSamples = new float[_fftSize];
-        var monoSamples = new float[_fftSize];
+        int sampleCount = Math.Min(samplesAvailable / 2, FFT_SIZE);
         
-        // Zero-pad unused buffer space
-        Array.Clear(leftSamples, sampleCount, _fftSize - sampleCount);
-        Array.Clear(rightSamples, sampleCount, _fftSize - sampleCount);
-        Array.Clear(monoSamples, sampleCount, _fftSize - sampleCount);
+        if (sampleCount < FFT_SIZE)
+        {
+            Array.Clear(_leftSamples, sampleCount, FFT_SIZE - sampleCount);
+            Array.Clear(_rightSamples, sampleCount, FFT_SIZE - sampleCount);
+            Array.Clear(_monoSamples, sampleCount, FFT_SIZE - sampleCount);
+        }
         
-        // Extract stereo samples and create mono mix
         for (int i = 0; i < sampleCount; i++)
         {
-            int sampleIndex = i * 2;
-            leftSamples[i] = BitConverter.ToSingle(e.Buffer, sampleIndex * 4);
-            rightSamples[i] = BitConverter.ToSingle(e.Buffer, (sampleIndex + 1) * 4);
-            monoSamples[i] = (leftSamples[i] + rightSamples[i]) / 2f;
+            int byteOffset = i * 8;
+            float left = BitConverter.ToSingle(buffer, byteOffset);
+            float right = BitConverter.ToSingle(buffer, byteOffset + 4);
+            
+            _leftSamples[i] = left;
+            _rightSamples[i] = right;
+            _monoSamples[i] = (left + right) * 0.5f;
         }
         
-        return (leftSamples, rightSamples, monoSamples);
+        return sampleCount;
     }
 
-    private Complex[] ProcessSpectrum(float[] samples)
+    private void ProcessSpectrumOptimized(float[] samples, int sampleCount, float[] magnitudesOut)
     {
-        lock (_fftLock)
+        int copyLen = Math.Min(sampleCount, FFT_SIZE);
+        for (int i = 0; i < copyLen; i++)
+            _fftBuffer[i] = samples[i] * _window[i];
+        
+        if (copyLen < FFT_SIZE)
+            Array.Clear(_fftBuffer, copyLen, FFT_SIZE - copyLen);
+        
+        Array.Copy(_fftBuffer, _realSpectrum, FFT_SIZE);
+        Array.Clear(_imagSpectrum, 0, FFT_SIZE);
+        
+        _fft.Direct(_realSpectrum, _realSpectrum, _imagSpectrum);
+        
+        float normFactor = 2.0f / FFT_SIZE;
+        for (int i = 0; i < SPECTRUM_SIZE; i++)
         {
-            Array.Copy(samples, _fftBuffer, Math.Min(samples.Length, _fftBuffer.Length));
-            
-            // Apply windowing
-            for (int i = 0; i < _fftBuffer.Length; i++)
-            {
-                _fftBuffer[i] *= _window[i];
-            }
-            
-            var realSpectrum = new float[_fftBuffer.Length];
-            var imagSpectrum = new float[_fftBuffer.Length];
-            Array.Copy(_fftBuffer, realSpectrum, _fftBuffer.Length);
-            _fft.Direct(realSpectrum, realSpectrum, imagSpectrum);
-            
-            var spectrum = new Complex[_spectrum.Length];
-            float normalizationFactor = 2.0f / _fftBuffer.Length;
-            
-            for (int i = 0; i < spectrum.Length; i++)
-            {
-                spectrum[i] = new Complex(
-                    realSpectrum[i] * normalizationFactor,
-                    imagSpectrum[i] * normalizationFactor
-                );
-            }
-            
-            // Apply DC and Nyquist corrections
-            if (spectrum.Length > 0)
-                spectrum[0] = spectrum[0] * 0.5f;
-            if (spectrum.Length > 1)
-                spectrum[spectrum.Length - 1] = spectrum[spectrum.Length - 1] * 0.5f;
-                
-            return spectrum;
+            float real = _realSpectrum[i] * normFactor;
+            float imag = _imagSpectrum[i] * normFactor;
+            float mag = MathF.Sqrt(real * real + imag * imag);
+            magnitudesOut[i] = mag < NOISE_FLOOR ? 0f : mag;
         }
+        
+        magnitudesOut[0] *= 0.5f;
+        magnitudesOut[SPECTRUM_SIZE - 1] *= 0.5f;
     }
 
-    private float CalculateVolume(float[] samples)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private float CalculateVolumeOptimized(float[] samples, int sampleCount, float[] magnitudes)
     {
-        if (samples.Length == 0)
-            return 0f;
+        if (sampleCount == 0) return 0f;
 
-        // Calculate RMS
-        var signal = new DiscreteSignal(48000, samples);
-        float rms = (float)signal.Rms();
+        float sumSquares = 0f;
+        for (int i = 0; i < sampleCount; i++)
+            sumSquares += samples[i] * samples[i];
+        
+        float rms = MathF.Sqrt(sumSquares / sampleCount);
         _currentRms = rms;
         
-        // Calculate spectral power
-        var powerSpectrum = ProcessPowerSpectrum(samples);
         float spectralPower = 0f;
-        
-        int maxBin = Math.Min(powerSpectrum.Length - 1, FrequencyToBin(20000));
+        int maxBin = Math.Min(SPECTRUM_SIZE - 1, (int)(20000 / _cachedBinWidth));
         
         for (int i = 0; i <= maxBin; i++)
-        {
-            spectralPower += powerSpectrum[i];
-        }
+            spectralPower += magnitudes[i] * magnitudes[i];
         
         if (maxBin > 0)
-        {
             spectralPower = MathF.Sqrt(spectralPower / maxBin);
-        }
 
-        // Combine RMS and spectral power
-        rms *= 4.0f;
-        spectralPower *= 0.25f;
-        float rawVolume = (rms * 0.7f + spectralPower * 0.3f);
-
-        return rawVolume;
+        return (rms * 4.0f * 0.7f) + (spectralPower * 0.25f * 0.3f);
     }
 
-    private float[] ProcessPowerSpectrum(float[] samples)
-    {
-        var windowedSamples = new float[samples.Length];
-        for (int i = 0; i < samples.Length; i++)
-        {
-            windowedSamples[i] = samples[i] * _window[i % _window.Length];
-        }
-
-        var realSpectrum = new float[_fftBuffer.Length];
-        var imagSpectrum = new float[_fftBuffer.Length];
-        Array.Copy(windowedSamples, realSpectrum, Math.Min(windowedSamples.Length, realSpectrum.Length));
-        _fft.Direct(realSpectrum, realSpectrum, imagSpectrum);
-
-        var powerSpectrum = new float[realSpectrum.Length / 2 + 1];
-        for (int i = 0; i < powerSpectrum.Length; i++)
-        {
-            powerSpectrum[i] = (realSpectrum[i] * realSpectrum[i] + imagSpectrum[i] * imagSpectrum[i]);
-        }
-
-        return powerSpectrum;
-    }
-
-    private float CalculateDirection(Complex[] leftSpectrum, Complex[] rightSpectrum, float volume)
+    private float CalculateDirectionOptimized(float[] leftMags, float[] rightMags, float volume)
     {
         if (volume < _settings.DirectionThreshold)
-        {
-            return ApplyDirectionalPause(0.5f);
-        }
-
-        float direction = _enhancedDirectionEnabled 
-            ? CalculateEnhancedDirection(leftSpectrum, rightSpectrum)
-            : CalculateBasicDirection(leftSpectrum, rightSpectrum);
-
-        return ApplyDirectionalPause(direction);
-    }
-
-    private float ApplyDirectionalPause(float direction)
-    {
-        if (!_settings.EnableDirectionalPause)
-            return direction;
-
-        var now = DateTime.Now;
-        var timeSinceLastUpdate = (now - _lastDirectionUpdate).TotalSeconds;
-
-        float deviationFromCenter = Math.Abs(direction - 0.5f) * 2f;
-        _directionPauseMultiplier = 1.0f + (deviationFromCenter * (_settings.DirectionalPauseFactor - 1.0f));
-
-        float requiredPauseTime = 0.016f * _directionPauseMultiplier;
-
-        if (timeSinceLastUpdate >= requiredPauseTime)
-        {
-            _lastDirectionUpdate = now;
-            return direction;
-        }
-
-        return _currentDirection;
-    }
-
-    private float CalculateBasicDirection(Complex[] leftSpectrum, Complex[] rightSpectrum)
-    {
-        float leftPower = 0f;
-        float rightPower = 0f;
-        int enabledBandCount = 0;
-
-        for (int band = 0; band < 7; band++)
-        {
-            if (!IsBandEnabled(band)) continue;
-            enabledBandCount++;
-
-            var (startFreq, endFreq) = GetFrequencyRange(band);
-            int startBin = FrequencyToBin(startFreq);
-            int endBin = FrequencyToBin(endFreq);
-
-            for (int bin = startBin; bin <= endBin && bin < leftSpectrum.Length; bin++)
-            {
-                leftPower += (float)leftSpectrum[bin].Magnitude;
-                rightPower += (float)rightSpectrum[bin].Magnitude;
-            }
-        }
-
-        if (enabledBandCount == 0 || leftPower + rightPower < 0.001f)
             return 0.5f;
 
-        return rightPower / (leftPower + rightPower);
-    }
-
-    private float CalculateEnhancedDirection(Complex[] leftSpectrum, Complex[] rightSpectrum)
-    {
-        int numBins = leftSpectrum.Length;
-        float sampleRate = 48000f;
-        float binWidth = sampleRate / (2f * (numBins - 1));
-        
         float totalWeight = 0f;
         float weightedDirectionSum = 0f;
 
-        var frequencyWeights = new float[] { 0.8f, 1.0f, 1.2f, 1.5f, 1.3f, 1.1f, 0.9f };
-        var frequencyRanges = new (float low, float high)[]
+        for (int band = 0; band < 7; band++)
         {
-            (20f, 60f), (60f, 250f), (250f, 500f), (500f, 2000f),
-            (2000f, 4000f), (4000f, 6000f), (6000f, 25000f)
-        };
+            if (!_settings.BandEnabled[band]) continue;
 
-        for (int band = 0; band < frequencyRanges.Length; band++)
-        {
-            var (startFreq, endFreq) = frequencyRanges[band];
-            int startBin = Math.Max(1, (int)Math.Floor(startFreq / binWidth));
-            int endBin = Math.Min(numBins - 1, (int)Math.Ceiling(endFreq / binWidth));
-            
-            float bandWeight = frequencyWeights[band];
+            var (startBin, endBin) = _bandBinRanges[band];
+            float bandWeight = FrequencyBandWeights[band];
             
             for (int bin = startBin; bin <= endBin; bin++)
             {
-                var left = leftSpectrum[bin];
-                var right = rightSpectrum[bin];
-                
-                float leftMag = (float)left.Magnitude;
-                float rightMag = (float)right.Magnitude;
+                float leftMag = leftMags[bin];
+                float rightMag = rightMags[bin];
                 float totalMag = leftMag + rightMag;
                 
                 if (totalMag < 1e-6f) continue;
                 
                 float magDirection = rightMag / totalMag;
+                float combinedDirection = _settings.EnablePhaseAnalysis
+                    ? _settings.MagnitudePhaseRatio * magDirection + (1f - _settings.MagnitudePhaseRatio) * 0.5f
+                    : magDirection;
                 
-                float phaseDirection = 0.5f;
-                if (_enablePhaseAnalysis)
-                {
-                    float leftPhase = (float)Math.Atan2(left.Imaginary, left.Real);
-                    float rightPhase = (float)Math.Atan2(right.Imaginary, right.Real);
-                    float phaseDiff = rightPhase - leftPhase;
-                    
-                    // Normalize phase difference
-                    while (phaseDiff > Math.PI) phaseDiff -= 2 * (float)Math.PI;
-                    while (phaseDiff < -Math.PI) phaseDiff += 2 * (float)Math.PI;
-                    
-                    phaseDirection = (phaseDiff + (float)Math.PI) / (2 * (float)Math.PI);
-                }
-                
-                float combinedDirection = (_magnitudeWeight * magDirection) + 
-                                        ((1f - _magnitudeWeight) * phaseDirection);
-                
-                float binPower = totalMag;
-                weightedDirectionSum += combinedDirection * binPower * bandWeight;
-                totalWeight += binPower * bandWeight;
+                weightedDirectionSum += combinedDirection * totalMag * bandWeight;
+                totalWeight += totalMag * bandWeight;
             }
         }
         
-        if (totalWeight < 1e-6f)
-            return 0.5f;
-        
-        return Math.Clamp(weightedDirectionSum / totalWeight, 0f, 1f);
+        return totalWeight < 1e-6f ? 0.5f : Math.Clamp(weightedDirectionSum / totalWeight, 0f, 1f);
     }
 
-    private float[] ProcessFrequencyBands(Complex[] spectrum, bool scaleWithVolume)
+    private void ProcessFrequencyBandsOptimized(float[] magnitudes, bool scaleWithVolume)
     {
-        int numBins = spectrum.Length;
+        Span<float> rawBands = stackalloc float[7];
         float totalPower = 0f;
-        float sampleRate = 48000f;
-        float binWidth = sampleRate / (2f * (numBins - 1));
-
-        var rawBands = new float[7];
         
         for (int band = 0; band < 7; band++)
         {
-            if (!IsBandEnabled(band)) continue;
+            if (!_settings.BandEnabled[band]) continue;
 
-            var (lowFreq, highFreq) = GetFrequencyRange(band);
-            
-            int startBin = Math.Max(1, (int)Math.Floor(lowFreq / binWidth));
-            int endBin = Math.Min(numBins - 1, (int)Math.Ceiling(highFreq / binWidth));
-            
+            var (startBin, endBin) = _bandBinRanges[band];
             float bandPower = 0f;
-            int binsInBand = 0;
+            int binsInBand = endBin - startBin + 1;
 
             for (int bin = startBin; bin <= endBin; bin++)
             {
-                float binFreq = bin * binWidth;
-                if (binFreq >= lowFreq && binFreq <= highFreq)
-                {
-                    float magnitude = (float)spectrum[bin].Magnitude;
-                    bandPower += magnitude * magnitude;
-                    binsInBand++;
-                }
+                float mag = magnitudes[bin];
+                if (mag > NOISE_FLOOR)
+                    bandPower += mag * mag;
             }
             
             if (binsInBand > 0)
@@ -468,58 +348,56 @@ public sealed class AudioProcessor : IDisposable
                 rawBands[band] = bandPower;
                 totalPower += bandPower;
             }
-            else
-            {
-                rawBands[band] = 0f;
-            }
         }
 
-        // Apply normalization and smoothing
-        var processedBands = new float[7];
-        if (totalPower > 0.001f)
+        float smoothing = _settings.FrequencySmoothing;
+        
+        if (totalPower > MIN_VOLUME_THRESHOLD)
         {
             for (int band = 0; band < 7; band++)
             {
-                if (!IsBandEnabled(band)) 
+                if (!_settings.BandEnabled[band])
                 {
-                    processedBands[band] = 0f;
+                    _result.FrequencyBands[band] = 0f;
                     continue;
                 }
 
-                float normalizedPower = scaleWithVolume 
-                    ? rawBands[band] * _currentVolume
-                    : rawBands[band] / totalPower;
-
-                float smoothing = _settings.FrequencySmoothing;
-                _smoothedFrequencyBands[band] = _smoothedFrequencyBands[band] * smoothing + 
-                                              normalizedPower * (1f - smoothing);
+                float bandValue = rawBands[band];
                 
-                processedBands[band] = _smoothedFrequencyBands[band];
+                if (bandValue < NOISE_FLOOR * 5f)
+                {
+                    bandValue = 0f;
+                }
+                else
+                {
+                    bandValue = scaleWithVolume 
+                        ? bandValue * _currentVolume * 2f
+                        : bandValue / totalPower;
+                }
+
+                _smoothedFrequencyBands[band] = _smoothedFrequencyBands[band] * smoothing + bandValue * (1f - smoothing);
+                _result.FrequencyBands[band] = _smoothedFrequencyBands[band];
             }
         }
         else
         {
-            // Fade to zero with smoothing
             for (int band = 0; band < 7; band++)
             {
-                float smoothing = _settings.FrequencySmoothing;
-                _smoothedFrequencyBands[band] = _smoothedFrequencyBands[band] * smoothing;
-                processedBands[band] = _smoothedFrequencyBands[band];
+                _smoothedFrequencyBands[band] *= smoothing;
+                _result.FrequencyBands[band] = _smoothedFrequencyBands[band];
             }
         }
-
-        return processedBands;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ApplyGainControl(float rawVolume)
     {
-        if (_settings.EnableAGC && rawVolume > 0.001f)
+        if (_settings.EnableAGC && rawVolume > MIN_VOLUME_THRESHOLD)
         {
-            float targetLevel = 0.5f;
+            const float targetLevel = 0.5f;
             float currentLevel = rawVolume * _currentGain;
-            float gainAdjustment = targetLevel / Math.Max(0.001f, currentLevel);
+            float gainAdjustment = targetLevel / MathF.Max(0.001f, currentLevel);
             
-            // Asymmetric adjustment speeds
             float adjustmentSpeed = gainAdjustment > 1.0f ? 0.1f : 0.3f;
             _currentGain = _currentGain * (1 - adjustmentSpeed) + (_settings.Gain * gainAdjustment) * adjustmentSpeed;
             _currentGain = Math.Clamp(_currentGain, 0.1f, 5.0f);
@@ -530,126 +408,31 @@ public sealed class AudioProcessor : IDisposable
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private float ApplyGainAndClipping(float rawVolume)
     {
         float volume = rawVolume * _currentGain;
-        
-        // Soft clipping for volumes above 1.0
         if (volume > 1.0f)
-        {
             volume = 1.0f - (1.0f / (1.0f + volume - 1.0f));
-        }
-        
         return Math.Clamp(volume, 0f, 1f);
     }
 
-    private void AdaptFftSize(int samplesAvailable)
-    {
-        int targetSize = 8192;
-        
-        if (targetSize != _fftSize)
-        {
-            lock (_fftLock)
-            {
-                _fftSize = targetSize;
-                InitializeFFTComponents();
-            }
-        }
-    }
-
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void UpdateState(float volume, float direction)
     {
-        _volumeHistory.Enqueue(volume);
-        if (_volumeHistory.Count > 3)
-            _volumeHistory.Dequeue();
-            
-        _directionHistory.Enqueue(direction);
-        if (_directionHistory.Count > 3)
-            _directionHistory.Dequeue();
-            
-        _recentVolumes.Enqueue(volume);
-        if (_recentVolumes.Count > 3)
-            _recentVolumes.Dequeue();
-            
-        // Apply smoothing
-        float smoothing = _settings.Smoothing;
-        _currentVolume = _currentVolume * smoothing + volume * (1 - smoothing);
-        _currentDirection = _currentDirection * smoothing + direction * (1 - smoothing);
-    }
+        float baseSmoothing = Math.Clamp(_settings.Smoothing, 0f, 0.99f);
+        _currentVolume = _currentVolume * baseSmoothing + volume * (1f - baseSmoothing);
 
-    private void LogPerformanceMetrics()
-    {
-        var now = DateTime.Now;
-        var elapsed = now - _lastPerformanceLog;
-        
-        if (elapsed.TotalSeconds >= 60) // Log every minute
+        float directionSmoothing = baseSmoothing;
+        if (_settings.EnableDirectionalPause)
         {
-            var fps = 500 / elapsed.TotalSeconds;
-            LogDebug($"Audio processor performance: {fps:F1} FPS, Gain: {_currentGain:F2}, Enhanced Direction: {_enhancedDirectionEnabled}");
-            _lastPerformanceLog = now;
+            float deviationFromCenter = MathF.Abs(direction - 0.5f) * 2f;
+            float multiplier = 1.0f + deviationFromCenter * (_settings.DirectionalPauseFactor - 1.0f);
+            directionSmoothing = Math.Clamp(baseSmoothing * multiplier, 0f, 0.99f);
         }
+
+        _currentDirection = _currentDirection * directionSmoothing + direction * (1f - directionSmoothing);
     }
-
-    private void LogDebug(string message)
-    {
-        // This would be injected in a real implementation
-        // For now, we'll use console output in debug builds
-        #if DEBUG
-        Console.WriteLine($"[AudioProcessor] {message}");
-        #endif
-    }
-
-    private void LogError(string message)
-    {
-        // This would be injected in a real implementation
-        // For now, we'll use console output
-        Console.WriteLine($"[AudioProcessor ERROR] {message}");
-    }
-
-    #endregion
-
-    #region Helper Methods
-
-    private (float lowFreq, float highFreq) GetFrequencyRange(int band)
-    {
-        return band switch
-        {
-            0 => (20, 60),     // Sub Bass
-            1 => (60, 250),    // Bass  
-            2 => (250, 500),   // Low Mids
-            3 => (500, 2000),  // Mids
-            4 => (2000, 4000), // Upper Mids
-            5 => (4000, 6000), // Presence
-            6 => (6000, 25000),// Brilliance
-            _ => (0, 0)
-        };
-    }
-
-    private int FrequencyToBin(float frequency)
-    {
-        float binWidth = 48000f / (float)_fftSize;
-        int bin = (int)Math.Round(frequency / binWidth);
-        return Math.Min(Math.Max(bin, 0), _fftSize / 2);
-    }
-
-    private bool IsBandEnabled(int bandIndex)
-    {
-        return bandIndex switch
-        {
-            0 => _settings.EnableSubBass,
-            1 => _settings.EnableBass,
-            2 => _settings.EnableLowMid,
-            3 => _settings.EnableMid,
-            4 => _settings.EnableUpperMid,
-            5 => _settings.EnablePresence,
-            6 => _settings.EnableBrilliance,
-            _ => false
-        };
-    }
-
-    #endregion
-
-    #region Reset and Dispose
 
     public void Reset()
     {
@@ -657,189 +440,74 @@ public sealed class AudioProcessor : IDisposable
         {
             _currentVolume = 0f;
             _currentDirection = 0.5f;
-            _volumeHistory.Clear();
-            _directionHistory.Clear();
-            _recentVolumes.Clear();
             _spikeDetector.Reset();
-            _frequencyProcessor.Reset();
-            Array.Clear(_smoothedFrequencyBands, 0, _smoothedFrequencyBands.Length);
-            _lastDirectionUpdate = DateTime.Now;
-            _directionPauseMultiplier = 1.0f;
-            _processedFrames = 0;
-            _lastPerformanceLog = DateTime.Now;
+            Array.Clear(_smoothedFrequencyBands);
         }
     }
 
     public void Dispose()
     {
-        if (_disposed)
-            return;
-
+        if (_disposed) return;
         _disposed = true;
         _spikeDetector?.Dispose();
-        _frequencyProcessor?.Dispose();
-        _fft = null;
-        _fftBuffer = null;
-        _spectrum = null;
-        _window = null;
     }
-
-    #endregion
 }
 
-/// <summary>
-/// Simplified audio settings class
-/// </summary>
-public class AudioSettings
+public sealed class SpikeDetector : IDisposable
 {
-    public float Gain { get; set; } = 1.0f;
-    public bool EnableAGC { get; set; } = true;
-    public float Smoothing { get; set; } = 0.3f;
-    public float DirectionThreshold { get; set; } = 0.01f;
-    public float SpikeThreshold { get; set; } = 2.0f;
-    public float SpikeHoldDuration { get; set; } = 0.5f;
-    public float FrequencySmoothing { get; set; } = 0.7f;
-    public bool EnableEnhancedDirection { get; set; } = false;
-    public float MagnitudePhaseRatio { get; set; } = 0.7f;
-    public bool EnablePhaseAnalysis { get; set; } = true;
-    public bool EnableDirectionalPause { get; set; } = false;
-    public float DirectionalPauseFactor { get; set; } = 1.0f;
-    public bool EnableHabituation { get; set; } = true;
-    public double HabituationIncrease { get; set; } = 0.15;
-    public double HabituationDecayRate { get; set; } = 0.02;
-    public double HabituationThreshold { get; set; } = 0.3;
-    public bool ScaleFrequencyWithVolume { get; set; } = false;
-    
-    // Frequency band enables
-    public bool EnableSubBass { get; set; } = true;
-    public bool EnableBass { get; set; } = true;
-    public bool EnableLowMid { get; set; } = true;
-    public bool EnableMid { get; set; } = true;
-    public bool EnableUpperMid { get; set; } = true;
-    public bool EnablePresence { get; set; } = true;
-    public bool EnableBrilliance { get; set; } = true;
-}
-
-/// <summary>
-/// Audio processing result
-/// </summary>
-public class AudioProcessingResult
-{
-    public float Volume { get; set; }
-    public float Direction { get; set; }
-    public float[] FrequencyBands { get; set; } = Array.Empty<float>();
-    public bool Spike { get; set; }
-    
-    public static AudioProcessingResult Empty => new()
-    {
-        Volume = 0f,
-        Direction = 0.5f,
-        FrequencyBands = new float[7],
-        Spike = false
-    };
-}
-
-/// <summary>
-/// Simplified spike detector
-/// </summary>
-public class SpikeDetector : IDisposable
-{
-    private readonly AudioSettings _settings;
+    private AudioSettings _settings;
     private float _lastAverageVolume;
     private bool _currentSpike;
-    private DateTime _lastSpikeTime;
+    private long _lastSpikeTimestamp;
     private double _habituationLevel;
-    private DateTime _lastHabituationUpdate = DateTime.Now;
+    private long _lastHabituationTimestamp;
+    
+    private static readonly long TicksPerSecond = Stopwatch.Frequency;
 
     public SpikeDetector(AudioSettings settings)
     {
-        _settings = settings;
+        _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _lastHabituationTimestamp = Stopwatch.GetTimestamp();
     }
 
+    public void UpdateSettings(AudioSettings settings)
+    {
+        _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool DetectSpike(float volume)
     {
-        var now = DateTime.Now;
-        
-        // Always update habituation regardless of spike detection
+        long now = Stopwatch.GetTimestamp();
         UpdateHabituationLevel(now);
 
-        // Check for spike
         bool processorDetectedSpike = volume > _lastAverageVolume * _settings.SpikeThreshold && volume > 0.1f;
         
-        if (processorDetectedSpike && ShouldActivateNewSpike())
+        if (processorDetectedSpike && _habituationLevel < _settings.HabituationThreshold)
         {
-            ActivateNewSpike(now);
+            _lastSpikeTimestamp = now;
+            _currentSpike = true;
+            _habituationLevel = Math.Min(1.0, _habituationLevel + _settings.HabituationIncrease);
         }
-        else if (_currentSpike && ShouldDeactivateCurrentSpike(now))
+        else if (_currentSpike)
         {
-            DeactivateCurrentSpike();
+            double secondsSinceSpike = (double)(now - _lastSpikeTimestamp) / TicksPerSecond;
+            if (secondsSinceSpike >= _settings.SpikeHoldDuration)
+                _currentSpike = false;
         }
 
-        // Update running average
         _lastAverageVolume = _lastAverageVolume * 0.9f + volume * 0.1f;
-
         return _currentSpike;
     }
 
-    private void UpdateHabituationLevel(DateTime currentTime)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void UpdateHabituationLevel(long currentTimestamp)
     {
-        if (!_settings.EnableHabituation)
-            return;
-            
-        if (_lastHabituationUpdate == DateTime.MinValue)
-        {
-            _lastHabituationUpdate = currentTime;
-            return;
-        }
-
-        var timeDeltaSeconds = (currentTime - _lastHabituationUpdate).TotalSeconds;
+        double timeDeltaSeconds = (double)(currentTimestamp - _lastHabituationTimestamp) / TicksPerSecond;
         if (timeDeltaSeconds <= 0) return;
 
-        // Apply exponential decay: habituation naturally decreases over time
-        var decayFactor = Math.Exp(-_settings.HabituationDecayRate * timeDeltaSeconds);
-        _habituationLevel = Math.Max(0.0, _habituationLevel * decayFactor);
-
-        _lastHabituationUpdate = currentTime;
-    }
-
-    private bool ShouldActivateNewSpike()
-    {
-        if (!_settings.EnableHabituation)
-            return true;
-            
-        // If habituation level is above threshold, ignore the spike (it's expected)
-        return _habituationLevel < _settings.HabituationThreshold;
-    }
-
-    private void ActivateNewSpike(DateTime currentTime)
-    {
-        _lastSpikeTime = currentTime;
-        _currentSpike = true;
-
-        // Increase habituation when a spike is activated
-        if (_settings.EnableHabituation)
-        {
-            _habituationLevel = Math.Min(1.0, _habituationLevel + _settings.HabituationIncrease);
-        }
-    }
-
-    private bool ShouldDeactivateCurrentSpike(DateTime currentTime)
-    {
-        var timeSinceSpike = (currentTime - _lastSpikeTime).TotalSeconds;
-        return timeSinceSpike >= _settings.SpikeHoldDuration;
-    }
-
-    private void DeactivateCurrentSpike()
-    {
-        _currentSpike = false;
-    }
-
-    public void ForceHabituationUpdate()
-    {
-        if (_settings.EnableHabituation)
-        {
-            UpdateHabituationLevel(DateTime.Now);
-        }
+        _habituationLevel = Math.Max(0.0, _habituationLevel * Math.Exp(-_settings.HabituationDecayRate * timeDeltaSeconds));
+        _lastHabituationTimestamp = currentTimestamp;
     }
 
     public void Reset()
@@ -847,34 +515,8 @@ public class SpikeDetector : IDisposable
         _lastAverageVolume = 0f;
         _currentSpike = false;
         _habituationLevel = 0;
-        _lastHabituationUpdate = DateTime.Now;
+        _lastHabituationTimestamp = Stopwatch.GetTimestamp();
     }
 
-    public void Dispose()
-    {
-        // Nothing to dispose
-    }
+    public void Dispose() { }
 }
-
-/// <summary>
-/// Simplified frequency band processor
-/// </summary>
-public class FrequencyBandProcessor : IDisposable
-{
-    private readonly AudioSettings _settings;
-
-    public FrequencyBandProcessor(AudioSettings settings)
-    {
-        _settings = settings;
-    }
-
-    public void Reset()
-    {
-        // Nothing to reset
-    }
-
-    public void Dispose()
-    {
-        // Nothing to dispose
-    }
-} 
