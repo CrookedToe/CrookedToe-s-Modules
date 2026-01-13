@@ -72,6 +72,7 @@ public class OSCLeashModule : Module
     ];
 
     private bool _isGrabbed;
+    private bool _leashEnabled = true;
     private float _stretch;
     private float _xPos, _xNeg, _yPos, _yNeg, _zPos, _zNeg;
     private bool _isWalking, _isRunning;
@@ -134,6 +135,7 @@ public class OSCLeashModule : Module
     private void RegisterAllParameters()
     {
         RegisterParameter<bool>(OSCLeashParameter.IsGrabbed, "Leash_IsGrabbed", ParameterMode.Read, "Leash Grabbed", "Whether the leash is being held");
+        RegisterParameter<bool>(OSCLeashParameter.LeashEnable, "leash_enable", ParameterMode.Read, "Leash Enable", "Enables/disables all leash pulling motion");
         
         foreach (var (key, address, name, desc) in FloatParameters)
             RegisterParameter<float>(key, address, ParameterMode.Read, name, desc);
@@ -160,6 +162,7 @@ public class OSCLeashModule : Module
         _parameterHandlers = new Dictionary<OSCLeashParameter, Action<RegisteredParameter>>
         {
             [OSCLeashParameter.IsGrabbed] = p => _isGrabbed = p.GetValue<bool>(),
+            [OSCLeashParameter.LeashEnable] = p => _leashEnabled = p.GetValue<bool>(),
             [OSCLeashParameter.Stretch] = p => _stretch = p.GetValue<float>(),
             [OSCLeashParameter.ZPositive] = p => _zPos = p.GetValue<float>(),
             [OSCLeashParameter.ZNegative] = p => _zNeg = p.GetValue<float>(),
@@ -202,6 +205,7 @@ public class OSCLeashModule : Module
     private void ClearModuleState()
     {
         _isGrabbed = false;
+        _leashEnabled = true;
         _stretch = 0f;
         _xPos = _xNeg = _yPos = _yNeg = _zPos = _zNeg = 0f;
         _isWalking = _isRunning = false;
@@ -314,17 +318,21 @@ public class OSCLeashModule : Module
         if (player == null) return;
 
         RefreshSettings();
+
+        // If this parameter is never received, it remains true by default.
+        bool grabbedForMotion = _isGrabbed && _leashEnabled;
         
-        bool justGrabbed = _isGrabbed && !_wasGrabbed;
-        bool justReleased = !_isGrabbed && _wasGrabbed;
-        _wasGrabbed = _isGrabbed;
+        bool justGrabbed = grabbedForMotion && !_wasGrabbed;
+        bool justReleased = !grabbedForMotion && _wasGrabbed;
+        _wasGrabbed = grabbedForMotion;
 
         UpdateMovementState();
         var movement = CalculateMovement();
         ApplyMovement(player, movement);
-        HandleVRState();
+        if (_leashEnabled)
+            HandleVRState();
         
-        if (_settings.VerticalEnabled && _vrInitialized)
+        if (_leashEnabled && _settings.VerticalEnabled && _vrInitialized)
             UpdateVR(justGrabbed, justReleased);
     }
 
@@ -366,7 +374,7 @@ public class OSCLeashModule : Module
 
     private void UpdateMovementState()
     {
-        if (_isGrabbed)
+        if (_isGrabbed && _leashEnabled)
         {
             _isWalking = _stretch > _settings.WalkDeadzone;
             _isRunning = _stretch > _settings.RunDeadzone;
@@ -380,7 +388,7 @@ public class OSCLeashModule : Module
 
     private (float x, float y, float z) CalculateMovement()
     {
-        if (!_isGrabbed)
+        if (!_isGrabbed || !_leashEnabled)
         {
             _smoothMoveX = 0f;
             _smoothMoveZ = 0f;
@@ -413,7 +421,7 @@ public class OSCLeashModule : Module
 
     private void ApplyMovement(Player player, (float x, float y, float z) movement)
     {
-        if (!_isGrabbed)
+        if (!_isGrabbed || !_leashEnabled)
         {
             player.StopRun();
             player.MoveVertical(0);

@@ -67,6 +67,7 @@ The module requires the following parameters to be set up in your avatar:
 | `Leash_X-` | Left movement value |
 | `Leash_Y+` | Up movement value |
 | `Leash_Y-` | Down movement value |
+| `leash_enable` | Enables/disables all leash pulling motion (defaults to enabled if never received) |
 
 The leash direction is set in the module settings:
 - `North` - Front-facing leash (default)

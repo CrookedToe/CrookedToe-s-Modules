@@ -11,7 +11,8 @@ public enum LeashDirection
 public enum OSCLeashParameter
 {
     ZPositive, ZNegative, XPositive, XNegative, 
-    YPositive, YNegative, IsGrabbed, Stretch
+    YPositive, YNegative, IsGrabbed, Stretch,
+    LeashEnable
 }
 
 public enum OSCLeashSetting
