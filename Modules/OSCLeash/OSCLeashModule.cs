@@ -14,31 +14,19 @@ public class OSCLeashModule : Module
 {
     private static readonly (OSCLeashSetting Key, string Name, string Description, float Default, float Min, float Max)[] SliderSettings =
     [
-        (OSCLeashSetting.WalkDeadzone, "Walk Deadzone", "Minimum leash stretch required for movement", 0.15f, 0f, 1f),
-        (OSCLeashSetting.RunDeadzone, "Run Deadzone", "Leash stretch required for running", 0.70f, 0f, 1f),
-        (OSCLeashSetting.StrengthMultiplier, "Movement Sensitivity", "How strongly leash pull maps to VRChat movement", 1.2f, 0.1f, 5f),
-        (OSCLeashSetting.UpDownDeadzone, "Vertical Compensation Deadzone", "Vertical pull required before horizontal movement is reduced", 0.5f, 0f, 1f),
-        (OSCLeashSetting.UpDownCompensation, "Vertical Compensation", "How much vertical pull reduces horizontal movement", 0.5f, 0f, 1f),
-        (OSCLeashSetting.MovementSmoothing, "Movement Smoothing", "Horizontal input smoothing", 0.7f, 0f, 0.95f),
-        (OSCLeashSetting.TurningMultiplier, "Turn Sensitivity", "How strongly side pull maps to VRChat turning", 0.8f, 0.1f, 2f),
-        (OSCLeashSetting.TurningDeadzone, "Turn Deadzone", "Minimum leash stretch required for turning", 0.15f, 0f, 1f),
-        (OSCLeashSetting.TurningGoal, "Minimum Turn Angle", "Minimum angle away from forward before turning starts", 20f, 0f, 90f),
-        (OSCLeashSetting.TurningVerticalAngleLimit, "Turn Vertical Limit", "Maximum vertical pull angle that still permits turning", 45f, 0f, 90f),
-        (OSCLeashSetting.VerticalMovementMultiplier, "Height Sensitivity", "Maximum height-drag speed in meters per second", 1f, 0.1f, 5f),
-        (OSCLeashSetting.VerticalMovementDeadzone, "Height Deadzone", "Minimum vertical pull required for height drag", 0.15f, 0f, 1f),
-        (OSCLeashSetting.VerticalMovementSmoothing, "Height Smoothing", "Height-drag velocity smoothing", 0.8f, 0f, 0.99f),
-        (OSCLeashSetting.VerticalHorizontalCompensation, "Height Pull Angle", "Minimum vertical angle required for height drag", 45f, 15f, 75f),
-        (OSCLeashSetting.GravityStrength, "Return Acceleration", "Acceleration used when returning to the grab height", 9.81f, 0.1f, 50f),
-        (OSCLeashSetting.TerminalVelocity, "Return Terminal Speed", "Maximum return speed", 15f, 1f, 50f),
-        (OSCLeashSetting.MaximumVerticalOffset, "Maximum Height Distance", "Maximum distance height drag may move from the grab height", 3f, 0.25f, 20f)
+        (OSCLeashSetting.WalkDeadzone, "Move Start", "How far the leash must stretch before movement starts", 0.15f, 0f, 1f),
+        (OSCLeashSetting.RunDeadzone, "Run Start", "How far the leash must stretch before running starts", 0.70f, 0f, 1f),
+        (OSCLeashSetting.StrengthMultiplier, "Pull Strength", "How strongly the leash controls movement speed", 1.2f, 0.1f, 5f),
+        (OSCLeashSetting.TurningMultiplier, "Turn Strength", "How strongly a side pull turns the avatar", 0.8f, 0.1f, 2f),
+        (OSCLeashSetting.VerticalMovementMultiplier, "Height Speed", "Maximum height-drag speed in meters per second", 1f, 0.1f, 5f),
+        (OSCLeashSetting.MaximumVerticalOffset, "Height Limit", "Maximum height distance from the position where the leash was grabbed", 3f, 0.25f, 20f)
     ];
 
     private static readonly (OSCLeashSetting Key, string Name, string Description, bool Default)[] ToggleSettings =
     [
-        (OSCLeashSetting.TurningEnabled, "Enable Turning", "Enables avatar rotation control", false),
-        (OSCLeashSetting.VerticalMovementEnabled, "Enable Height Drag", "Enables OpenVR playspace height control", false),
-        (OSCLeashSetting.GrabBasedGravity, "Return Height On Release", "Returns to the grab height when the leash is released", false),
-        (OSCLeashSetting.DebugTraceEnabled, "Record Debug Trace", "Records a sampled JSONL trace for troubleshooting", false)
+        (OSCLeashSetting.TurningEnabled, "Allow Turning", "Allows side pulls to turn the avatar", false),
+        (OSCLeashSetting.VerticalMovementEnabled, "Allow Height Drag", "Allows vertical pulls to move the OpenVR playspace", false),
+        (OSCLeashSetting.GrabBasedGravity, "Return Height on Release", "Returns to the original grab height after the leash is released", false)
     ];
 
     private static readonly (OSCLeashParameter Key, string Address, string Name, string Description)[] FloatParameters =
@@ -56,7 +44,6 @@ public class OSCLeashModule : Module
     private readonly VerticalMotionState _verticalMotion = new();
     private readonly ExternalPoseRecoveryState _poseRecovery = new();
     private readonly OpenVrPoseCoordinator _openVr = new();
-    private readonly LeashTraceRecorder _trace = new();
 
     private bool _isGrabbed;
     private bool _leashEnabled = true;
@@ -104,8 +91,6 @@ public class OSCLeashModule : Module
     {
         _isStopping = true;
         ResetPlayerInput();
-        _trace.Dispose();
-
         PoseUpdateResult cleanupResult = RemoveOwnOffsetWithRetry();
         if (cleanupResult is not PoseUpdateResult.Success and not PoseUpdateResult.NoChange)
             Log($"OSC Leash height cleanup: {cleanupResult}");
@@ -136,7 +121,11 @@ public class OSCLeashModule : Module
         foreach (var (key, name, description, defaultValue) in ToggleSettings)
             CreateToggle(key, name, description, defaultValue);
 
-        CreateDropdown(OSCLeashSetting.LeashDirection, "Leash Direction", "Direction the leash faces", LeashDirection.North);
+        CreateDropdown(
+            OSCLeashSetting.LeashDirection,
+            "Leash Forward",
+            "Prefab forward axis used for turning; most prefabs use North (+Z)",
+            LeashDirection.North);
     }
 
     private void RegisterParameters()
@@ -152,38 +141,25 @@ public class OSCLeashModule : Module
     {
         CreateGroup(
             "Movement",
-            "Core movement behavior",
-            OSCLeashSetting.LeashDirection,
+            "When movement starts and how strongly it responds",
             OSCLeashSetting.WalkDeadzone,
             OSCLeashSetting.RunDeadzone,
-            OSCLeashSetting.StrengthMultiplier,
-            OSCLeashSetting.UpDownDeadzone,
-            OSCLeashSetting.UpDownCompensation,
-            OSCLeashSetting.MovementSmoothing);
+            OSCLeashSetting.StrengthMultiplier);
 
         CreateGroup(
             "Turning",
-            "Avatar rotation behavior",
+            "Optional turning from side pulls",
             OSCLeashSetting.TurningEnabled,
-            OSCLeashSetting.TurningMultiplier,
-            OSCLeashSetting.TurningDeadzone,
-            OSCLeashSetting.TurningGoal,
-            OSCLeashSetting.TurningVerticalAngleLimit);
+            OSCLeashSetting.LeashDirection,
+            OSCLeashSetting.TurningMultiplier);
 
         CreateGroup(
             "Height Drag",
-            "OpenVR height behavior",
+            "Optional OpenVR playspace height control",
             OSCLeashSetting.VerticalMovementEnabled,
             OSCLeashSetting.VerticalMovementMultiplier,
-            OSCLeashSetting.VerticalMovementDeadzone,
-            OSCLeashSetting.VerticalMovementSmoothing,
-            OSCLeashSetting.VerticalHorizontalCompensation,
             OSCLeashSetting.MaximumVerticalOffset,
-            OSCLeashSetting.GrabBasedGravity,
-            OSCLeashSetting.GravityStrength,
-            OSCLeashSetting.TerminalVelocity);
-
-        CreateGroup("Debug", "Troubleshooting", OSCLeashSetting.DebugTraceEnabled);
+            OSCLeashSetting.GrabBasedGravity);
     }
 
     [ModuleUpdate(ModuleUpdateMode.Custom, true, LeashDefaults.UpdateIntervalMilliseconds)]
@@ -195,7 +171,6 @@ public class OSCLeashModule : Module
         long now = Stopwatch.GetTimestamp();
         float deltaTime = GetDeltaTime(now);
         RefreshSettings();
-        _trace.SetEnabled(_settings.DebugTraceEnabled, Log);
 
         bool grabbedForMotion = _isGrabbed && _leashEnabled;
         bool justGrabbed = grabbedForMotion && !_wasGrabbedForMotion;
@@ -213,7 +188,6 @@ public class OSCLeashModule : Module
         Player? player = GetClient().Player;
         if (player is not null)
             ApplyMovement(player, intent, grabbedForMotion);
-        RecordTrace(signal, intent, grabbedForMotion);
     }
 
     private float GetDeltaTime(long now)
@@ -232,28 +206,16 @@ public class OSCLeashModule : Module
     private void RefreshSettings()
     {
         _settings = new LeashSettings(
-            GetSettingValue<float>(OSCLeashSetting.WalkDeadzone),
-            GetSettingValue<float>(OSCLeashSetting.RunDeadzone),
-            GetSettingValue<float>(OSCLeashSetting.StrengthMultiplier),
-            GetSettingValue<float>(OSCLeashSetting.UpDownDeadzone),
-            GetSettingValue<float>(OSCLeashSetting.UpDownCompensation),
-            GetSettingValue<float>(OSCLeashSetting.MovementSmoothing),
-            GetSettingValue<LeashDirection>(OSCLeashSetting.LeashDirection),
-            GetSettingValue<bool>(OSCLeashSetting.TurningEnabled),
-            GetSettingValue<float>(OSCLeashSetting.TurningMultiplier),
-            GetSettingValue<float>(OSCLeashSetting.TurningDeadzone),
-            GetSettingValue<float>(OSCLeashSetting.TurningGoal),
-            GetSettingValue<float>(OSCLeashSetting.TurningVerticalAngleLimit),
-            GetSettingValue<bool>(OSCLeashSetting.VerticalMovementEnabled),
-            GetSettingValue<bool>(OSCLeashSetting.GrabBasedGravity),
-            GetSettingValue<float>(OSCLeashSetting.VerticalMovementMultiplier),
-            GetSettingValue<float>(OSCLeashSetting.VerticalMovementDeadzone),
-            GetSettingValue<float>(OSCLeashSetting.VerticalMovementSmoothing),
-            GetSettingValue<float>(OSCLeashSetting.VerticalHorizontalCompensation),
-            GetSettingValue<float>(OSCLeashSetting.GravityStrength),
-            GetSettingValue<float>(OSCLeashSetting.TerminalVelocity),
-            GetSettingValue<float>(OSCLeashSetting.MaximumVerticalOffset),
-            GetSettingValue<bool>(OSCLeashSetting.DebugTraceEnabled));
+            WalkDeadzone: GetSettingValue<float>(OSCLeashSetting.WalkDeadzone),
+            RunDeadzone: GetSettingValue<float>(OSCLeashSetting.RunDeadzone),
+            StrengthMultiplier: GetSettingValue<float>(OSCLeashSetting.StrengthMultiplier),
+            Direction: GetSettingValue<LeashDirection>(OSCLeashSetting.LeashDirection),
+            TurningEnabled: GetSettingValue<bool>(OSCLeashSetting.TurningEnabled),
+            TurningMultiplier: GetSettingValue<float>(OSCLeashSetting.TurningMultiplier),
+            VerticalEnabled: GetSettingValue<bool>(OSCLeashSetting.VerticalMovementEnabled),
+            ReturnHeightOnRelease: GetSettingValue<bool>(OSCLeashSetting.GrabBasedGravity),
+            VerticalMultiplier: GetSettingValue<float>(OSCLeashSetting.VerticalMovementMultiplier),
+            MaximumVerticalOffset: GetSettingValue<float>(OSCLeashSetting.MaximumVerticalOffset));
     }
 
     private void MaintainOpenVrConnection(long now)
@@ -357,15 +319,15 @@ public class OSCLeashModule : Module
 
             changed = _verticalMotion.ApplyPull(
                 intent.VerticalTargetVelocity,
-                _settings.VerticalSmoothing,
+                LeashDefaults.HeightSmoothing,
                 deltaTime,
                 _settings.MaximumVerticalOffset);
         }
         else if (_settings.ReturnHeightOnRelease)
         {
             changed = _verticalMotion.ReturnToOrigin(
-                _settings.GravityStrength,
-                _settings.TerminalVelocity,
+                LeashDefaults.ReturnAcceleration,
+                LeashDefaults.ReturnMaximumSpeed,
                 deltaTime);
         }
         else
@@ -498,49 +460,6 @@ public class OSCLeashModule : Module
         try { player.MoveHorizontal(0f); } catch { }
         try { player.LookHorizontal(0f); } catch { }
         _turnInputActive = false;
-    }
-
-    private void RecordTrace(LeashSignal signal, LeashIntent intent, bool grabbedForMotion)
-    {
-        if (!_settings.DebugTraceEnabled)
-            return;
-
-        bool returningHeight = !grabbedForMotion &&
-                               _settings.ReturnHeightOnRelease &&
-                               (MathF.Abs(_verticalMotion.Offset) > LeashDefaults.NormalizeEpsilon ||
-                                MathF.Abs(_verticalMotion.Velocity) > LeashDefaults.NormalizeEpsilon);
-        if (!_trace.ShouldSample(grabbedForMotion || returningHeight))
-            return;
-
-        _trace.Record(new
-        {
-            TimestampUtc = DateTime.UtcNow,
-            Settings = _settings,
-            Input = new
-            {
-                Grabbed = _isGrabbed,
-                Enabled = _leashEnabled,
-                GrabbedForMotion = grabbedForMotion,
-                Stretch = _stretch,
-                XPositive = _xPositive,
-                XNegative = _xNegative,
-                YPositive = _yPositive,
-                YNegative = _yNegative,
-                ZPositive = _zPositive,
-                ZNegative = _zNegative
-            },
-            Signal = signal,
-            Intent = intent,
-            Vertical = new
-            {
-                _verticalMotion.Offset,
-                _verticalMotion.Velocity,
-                SuspendedForExternalWriter = _poseRecovery.Suspended,
-                LockedUntilRegrab = _poseRecovery.LockedUntilRegrab,
-                _poseRecovery.AutomaticResumeAttempts
-            },
-            OpenVr = _openVr.Snapshot()
-        }, Log);
     }
 
     private void HandleVrResult(PoseUpdateResult result, string operation, long now)

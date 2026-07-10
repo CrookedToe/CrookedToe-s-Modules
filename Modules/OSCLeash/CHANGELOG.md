@@ -17,11 +17,17 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Bound height drag with a configurable maximum distance
-- Split movement, vertical physics, OpenVR ownership, and trace recording into focused components
-- Sample and buffer debug traces to reduce update-loop overhead
+- Split movement, vertical physics, and OpenVR ownership into focused components
+- Reduce the settings menu from 22 controls to 10 clearly named user choices
+- Use tested internal values for smoothing, compensation, turn gating, and height-return physics
+- Cap combined diagonal movement to the same maximum magnitude as straight movement
 
 ### Added
 - Regression tests for external pose ownership, safe cleanup, smoothing, and bounded return motion
+- Trace-derived control-loop regression coverage for vertical pulls, diagonal ramps, reversals, and axis drops
+
+### Removed
+- Remove runtime debug trace recording after converting captured failure windows into regression fixtures
 
 ## [0.2.3] - 2025-01-13
 

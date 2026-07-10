@@ -19,4 +19,8 @@
     <ProjectReference Include="..\Modules\CrookedToesModules.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="OSCLeash\Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

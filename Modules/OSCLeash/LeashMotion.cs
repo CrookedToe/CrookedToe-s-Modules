@@ -16,31 +16,30 @@ internal static class LeashDefaults
     public const float DirectionChangeHoldSeconds = 0.12f;
     public const float AngleHysteresisDegrees = 5f;
     public const float DeadzoneHysteresisFactor = 0.8f;
+    public const float MovementSmoothing = 0.7f;
+    public const float VerticalCompensationThreshold = 0.5f;
+    public const float VerticalCompensationStrength = 0.5f;
+    public const float TurnDeadzone = 0.15f;
+    public const float TurnStartAngleDegrees = 20f;
+    public const float TurnVerticalLimitDegrees = 45f;
+    public const float HeightDeadzone = 0.15f;
+    public const float HeightSmoothing = 0.8f;
+    public const float HeightActivationAngleDegrees = 45f;
+    public const float ReturnAcceleration = 9.81f;
+    public const float ReturnMaximumSpeed = 15f;
 }
 
 internal readonly record struct LeashSettings(
     float WalkDeadzone,
     float RunDeadzone,
     float StrengthMultiplier,
-    float UpDownDeadzone,
-    float UpDownCompensation,
-    float MovementSmoothing,
     LeashDirection Direction,
     bool TurningEnabled,
     float TurningMultiplier,
-    float TurningDeadzone,
-    float TurningGoal,
-    float TurningVerticalAngleLimit,
     bool VerticalEnabled,
     bool ReturnHeightOnRelease,
     float VerticalMultiplier,
-    float VerticalDeadzone,
-    float VerticalSmoothing,
-    float VerticalAngle,
-    float GravityStrength,
-    float TerminalVelocity,
-    float MaximumVerticalOffset,
-    bool DebugTraceEnabled);
+    float MaximumVerticalOffset);
 
 internal readonly record struct LeashSignal(
     float NetX,
@@ -145,10 +144,10 @@ internal sealed class LeashMotionEngine
 
         float netX = signal.NetX;
         float netZ = signal.NetZ;
-        if (signal.VerticalMagnitude >= settings.UpDownDeadzone && settings.UpDownCompensation > 0f)
+        if (signal.VerticalMagnitude >= LeashDefaults.VerticalCompensationThreshold)
         {
             float compensation = Math.Clamp(
-                1f - (signal.VerticalMagnitude * settings.UpDownCompensation * 0.5f),
+                1f - (signal.VerticalMagnitude * LeashDefaults.VerticalCompensationStrength * 0.5f),
                 0.1f,
                 1f);
             netX *= compensation;
@@ -156,12 +155,23 @@ internal sealed class LeashMotionEngine
         }
 
         float strength = signal.Stretch * settings.StrengthMultiplier;
-        float targetX = Math.Clamp(netX * strength, -1f, 1f);
-        float targetZ = Math.Clamp(netZ * strength, -1f, 1f);
+        (float targetX, float targetZ) = ClampToUnitCircle(netX * strength, netZ * strength);
 
         return (
-            _moveX.Update(targetX, settings.MovementSmoothing, deltaTime),
-            _moveZ.Update(targetZ, settings.MovementSmoothing, deltaTime));
+            _moveX.Update(targetX, LeashDefaults.MovementSmoothing, deltaTime),
+            _moveZ.Update(targetZ, LeashDefaults.MovementSmoothing, deltaTime));
+    }
+
+    private static (float X, float Z) ClampToUnitCircle(float x, float z)
+    {
+        float magnitude = MathF.Sqrt((x * x) + (z * z));
+        if (!float.IsFinite(magnitude) || magnitude <= LeashDefaults.NormalizeEpsilon)
+            return (0f, 0f);
+        if (magnitude <= 1f)
+            return (x, z);
+
+        float scale = 1f / magnitude;
+        return (x * scale, z * scale);
     }
 
     private bool ResolveVerticalMode(LeashSignal signal, LeashSettings settings)
@@ -172,11 +182,12 @@ internal sealed class LeashMotionEngine
             return false;
         }
 
-        float exitAngle = Math.Max(0f, settings.VerticalAngle - LeashDefaults.AngleHysteresisDegrees);
-        float exitDeadzone = settings.VerticalDeadzone * LeashDefaults.DeadzoneHysteresisFactor;
+        float exitAngle = LeashDefaults.HeightActivationAngleDegrees - LeashDefaults.AngleHysteresisDegrees;
+        float exitDeadzone = LeashDefaults.HeightDeadzone * LeashDefaults.DeadzoneHysteresisFactor;
         _verticalModeActive = _verticalModeActive
             ? signal.VerticalAngle >= exitAngle && signal.VerticalMagnitude >= exitDeadzone
-            : signal.VerticalAngle >= settings.VerticalAngle && signal.VerticalMagnitude >= settings.VerticalDeadzone;
+            : signal.VerticalAngle >= LeashDefaults.HeightActivationAngleDegrees &&
+              signal.VerticalMagnitude >= LeashDefaults.HeightDeadzone;
 
         return _verticalModeActive;
     }
@@ -189,11 +200,12 @@ internal sealed class LeashMotionEngine
             return false;
         }
 
-        float exitAngle = Math.Min(90f, settings.TurningVerticalAngleLimit + LeashDefaults.AngleHysteresisDegrees);
-        float exitDeadzone = settings.TurningDeadzone * LeashDefaults.DeadzoneHysteresisFactor;
+        float exitAngle = LeashDefaults.TurnVerticalLimitDegrees + LeashDefaults.AngleHysteresisDegrees;
+        float exitDeadzone = LeashDefaults.TurnDeadzone * LeashDefaults.DeadzoneHysteresisFactor;
         _turnModeActive = _turnModeActive
             ? signal.Stretch > exitDeadzone && signal.VerticalAngle <= exitAngle
-            : signal.Stretch > settings.TurningDeadzone && signal.VerticalAngle <= settings.TurningVerticalAngleLimit;
+            : signal.Stretch > LeashDefaults.TurnDeadzone &&
+              signal.VerticalAngle <= LeashDefaults.TurnVerticalLimitDegrees;
 
         return _turnModeActive;
     }
@@ -215,10 +227,11 @@ internal sealed class LeashMotionEngine
             return 0f;
 
         float pullAngle = MathF.Abs(MathF.Atan2(sideDot, forwardDot) * (180f / MathF.PI));
-        if (pullAngle < settings.TurningGoal)
+        if (pullAngle < LeashDefaults.TurnStartAngleDegrees)
             return 0f;
 
-        float strength = (pullAngle - settings.TurningGoal) / Math.Max(1f, 180f - settings.TurningGoal);
+        float strength = (pullAngle - LeashDefaults.TurnStartAngleDegrees) /
+                         (180f - LeashDefaults.TurnStartAngleDegrees);
         return Math.Clamp(
             MathF.Sign(sideDot) * strength * signal.Stretch * settings.TurningMultiplier,
             -1f,
@@ -383,8 +396,6 @@ internal sealed class ExternalPoseRecoveryState
 
     public bool Suspended { get; private set; }
     public bool LockedUntilRegrab { get; private set; }
-    public int AutomaticResumeAttempts => _automaticResumeAttempts;
-
     public void Reset()
     {
         Suspended = false;

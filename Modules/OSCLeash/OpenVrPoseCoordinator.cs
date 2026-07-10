@@ -12,14 +12,6 @@ internal enum PoseUpdateResult
     WriteFailed
 }
 
-internal readonly record struct OpenVrPoseSnapshot(
-    bool Connected,
-    bool OwnsPose,
-    float ReferenceHeight,
-    float LastAppliedOffset,
-    int ExternalConflictCount,
-    PoseUpdateResult LastResult);
-
 internal static class StandingPoseMath
 {
     private const float RotationEpsilon = 0.0001f;
@@ -134,8 +126,6 @@ internal sealed class OpenVrPoseCoordinator
 {
     private readonly PoseOwnershipTracker _ownership = new();
     private bool _connected;
-    private int _externalConflictCount;
-    private PoseUpdateResult _lastResult = PoseUpdateResult.NoChange;
 
     public bool Connected => _connected;
     public bool OwnsPose => _ownership.OwnsPose;
@@ -146,52 +136,50 @@ internal sealed class OpenVrPoseCoordinator
     {
         PoseUpdateResult readResult = TryRead(out HmdMatrix34_t livePose);
         if (readResult != PoseUpdateResult.Success)
-            return SetResult(readResult);
+            return readResult;
 
         _connected = true;
         if (_ownership.OwnsPose)
         {
             if (!_ownership.LivePoseMatchesLastWrite(livePose))
             {
-                _externalConflictCount++;
                 _ownership.YieldToExternalPose(livePose);
-                return SetResult(PoseUpdateResult.ExternalWriterActive);
+                return PoseUpdateResult.ExternalWriterActive;
             }
 
-            return SetResult(PoseUpdateResult.Success);
+            return PoseUpdateResult.Success;
         }
 
         _ownership.CaptureBaseline(livePose);
-        return SetResult(PoseUpdateResult.Success);
+        return PoseUpdateResult.Success;
     }
 
     public PoseUpdateResult RefreshBaseline()
     {
         PoseUpdateResult readResult = TryRead(out HmdMatrix34_t livePose);
         if (readResult != PoseUpdateResult.Success)
-            return SetResult(readResult);
+            return readResult;
 
         _connected = true;
         _ownership.CaptureBaseline(livePose);
-        return SetResult(PoseUpdateResult.Success);
+        return PoseUpdateResult.Success;
     }
 
     public PoseUpdateResult ApplyOffset(float targetOffset)
     {
         PoseUpdateResult readResult = TryRead(out HmdMatrix34_t livePose);
         if (readResult != PoseUpdateResult.Success)
-            return SetResult(readResult);
+            return readResult;
 
         _connected = true;
         PoseUpdateResult compositionResult = _ownership.TryCompose(livePose, targetOffset, out HmdMatrix34_t poseToWrite);
         if (compositionResult == PoseUpdateResult.ExternalWriterActive)
         {
-            _externalConflictCount++;
             _ownership.YieldToExternalPose(livePose);
-            return SetResult(compositionResult);
+            return compositionResult;
         }
         if (compositionResult != PoseUpdateResult.Success)
-            return SetResult(compositionResult);
+            return compositionResult;
 
         return PreviewPose(poseToWrite, targetOffset);
     }
@@ -199,21 +187,20 @@ internal sealed class OpenVrPoseCoordinator
     public PoseUpdateResult RemoveOwnOffset()
     {
         if (!_ownership.OwnsPose)
-            return SetResult(PoseUpdateResult.NoChange);
+            return PoseUpdateResult.NoChange;
 
         PoseUpdateResult readResult = TryRead(out HmdMatrix34_t livePose);
         if (readResult != PoseUpdateResult.Success)
-            return SetResult(readResult);
+            return readResult;
 
         PoseUpdateResult restoreResult = _ownership.TryBuildRestore(livePose, out HmdMatrix34_t poseToWrite);
         if (restoreResult == PoseUpdateResult.ExternalWriterActive)
         {
-            _externalConflictCount++;
             _ownership.YieldToExternalPose(livePose);
-            return SetResult(restoreResult);
+            return restoreResult;
         }
         if (restoreResult != PoseUpdateResult.Success)
-            return SetResult(restoreResult);
+            return restoreResult;
 
         PoseUpdateResult writeResult = PreviewPose(poseToWrite, 0f);
         if (writeResult == PoseUpdateResult.Success)
@@ -226,15 +213,15 @@ internal sealed class OpenVrPoseCoordinator
         changed = false;
         PoseUpdateResult readResult = TryRead(out HmdMatrix34_t livePose);
         if (readResult != PoseUpdateResult.Success)
-            return SetResult(readResult);
+            return readResult;
 
         _connected = true;
         if (_ownership.LivePoseMatchesBaseline(livePose))
-            return SetResult(PoseUpdateResult.Success);
+            return PoseUpdateResult.Success;
 
         changed = true;
         _ownership.CaptureBaseline(livePose);
-        return SetResult(PoseUpdateResult.ExternalWriterActive);
+        return PoseUpdateResult.ExternalWriterActive;
     }
 
     public void ReleaseZeroOffsetOwnership()
@@ -253,13 +240,8 @@ internal sealed class OpenVrPoseCoordinator
     public void Clear()
     {
         _connected = false;
-        _externalConflictCount = 0;
-        _lastResult = PoseUpdateResult.NoChange;
         _ownership.Clear();
     }
-
-    public OpenVrPoseSnapshot Snapshot()
-        => new(_connected, _ownership.OwnsPose, _ownership.ReferenceHeight, _ownership.LastAppliedOffset, _externalConflictCount, _lastResult);
 
     private PoseUpdateResult PreviewPose(HmdMatrix34_t pose, float appliedOffset)
     {
@@ -269,18 +251,18 @@ internal sealed class OpenVrPoseCoordinator
             if (setup is null)
             {
                 _connected = false;
-                return SetResult(PoseUpdateResult.OpenVrUnavailable);
+                return PoseUpdateResult.OpenVrUnavailable;
             }
 
             setup.SetWorkingStandingZeroPoseToRawTrackingPose(ref pose);
             _ownership.AcceptWrite(pose, appliedOffset);
             setup.ShowWorkingSetPreview();
-            return SetResult(PoseUpdateResult.Success);
+            return PoseUpdateResult.Success;
         }
         catch
         {
             _connected = false;
-            return SetResult(PoseUpdateResult.WriteFailed);
+            return PoseUpdateResult.WriteFailed;
         }
     }
 
@@ -309,9 +291,4 @@ internal sealed class OpenVrPoseCoordinator
         }
     }
 
-    private PoseUpdateResult SetResult(PoseUpdateResult result)
-    {
-        _lastResult = result;
-        return result;
-    }
 }

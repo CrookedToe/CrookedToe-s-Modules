@@ -58,25 +58,21 @@ This prevents sustained writer-versus-writer jitter, preserves stable OVRAS offs
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| Leash Direction | North | Direction the leash faces |
-| Walk Deadzone | 0.15 | Stretch required before walking |
-| Run Deadzone | 0.70 | Stretch required before running |
-| Movement Sensitivity | 1.2 | Pull-to-input strength |
-| Vertical Compensation Deadzone | 0.5 | Vertical pull before horizontal reduction begins |
-| Vertical Compensation | 0.5 | Horizontal reduction during vertical pulls |
-| Movement Smoothing | 0.7 | Horizontal input smoothing |
+| Move Start | 0.15 | Leash stretch required before movement starts |
+| Run Start | 0.70 | Leash stretch required before running starts |
+| Pull Strength | 1.2 | How strongly pull maps to movement speed |
 
 Movement smoothing applies only while acceleration is increasing. If the leash pull weakens or reaches zero, movement input brakes immediately instead of decaying from an older, stronger command. Direction reversals output zero until the opposite pull remains stable for 120 ms, preventing rapid forward/back or left/right correction loops.
+
+Combined horizontal input is capped to a unit circle so diagonal pulls cannot command more total movement than straight pulls.
 
 ### Turning
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| Enable Turning | false | Enables VRChat turn input |
-| Turn Sensitivity | 0.8 | Side-pull turn strength |
-| Turn Deadzone | 0.15 | Stretch required before turning |
-| Minimum Turn Angle | 20 degrees | Angle away from forward before turning |
-| Turn Vertical Limit | 45 degrees | Vertical angle above which turning is suppressed |
+| Allow Turning | false | Allows side pulls to control VRChat turning |
+| Leash Forward | North | Prefab forward axis used to calculate turning; normally North (+Z) |
+| Turn Strength | 0.8 | Side-pull turn strength |
 
 Comfort turning in VRChat can alter or suppress the resulting turn input.
 
@@ -84,27 +80,12 @@ Comfort turning in VRChat can alter or suppress the resulting turn input.
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| Enable Height Drag | false | Enables OpenVR height control |
-| Height Sensitivity | 1.0 | Maximum height speed in meters per second |
-| Height Deadzone | 0.15 | Vertical pull required for height drag |
-| Height Smoothing | 0.8 | Height velocity smoothing |
-| Height Pull Angle | 45 degrees | Required vertical pull angle |
-| Maximum Height Distance | 3 m | Safety bound from the grab height |
-| Return Height On Release | false | Returns to the grab height after release |
-| Return Acceleration | 9.81 | Return acceleration |
-| Return Terminal Speed | 15 | Maximum return speed |
+| Allow Height Drag | false | Allows vertical pulls to control OpenVR height |
+| Height Speed | 1.0 | Maximum height speed in meters per second |
+| Height Limit | 3 m | Safety bound from the position where the leash was grabbed |
+| Return Height on Release | false | Returns to the original grab height after release |
 
-Existing VRCOSC values for the legacy movement, deadzone, smoothing, and gravity setting keys remain in use.
-
-## Debug trace
-
-`Record Debug Trace` writes a sampled JSONL trace under:
-
-```text
-%LOCALAPPDATA%\VRCOSC\OSCLeash\Debug
-```
-
-The trace records state transitions plus active movement and height return at 10 Hz, and flushes once per second. Idle periods are omitted after their initial state transition so recording does not dominate the 8 ms movement loop or produce unnecessarily large files.
+Smoothing, vertical compensation, turn activation, and height-return physics use tested internal values. They are intentionally not exposed because changing them can make the control loop unstable or difficult to understand. Existing saved values for the ten retained settings continue to use their original keys.
 
 ## Troubleshooting
 
