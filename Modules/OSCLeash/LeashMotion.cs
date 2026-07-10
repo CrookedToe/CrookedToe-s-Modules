@@ -90,22 +90,9 @@ internal readonly record struct LeashIntent(
     float TurnValue,
     bool HasTurnInput,
     bool VerticalModeActive,
-    bool TurnSuppressedByVertical,
-    bool ShouldApplyVerticalPull,
-    float VerticalTargetVelocity,
-    float PullVerticalAngle)
+    float VerticalTargetVelocity)
 {
-    public static readonly LeashIntent Idle = new(0f, 0f, false, 0f, false, false, false, false, 0f, 0f);
-}
-
-internal readonly record struct MovementCommand(
-    bool Run,
-    float MoveVertical,
-    float MoveHorizontal,
-    bool TurnWritten,
-    float TurnHorizontal)
-{
-    public static readonly MovementCommand None = new(false, 0f, 0f, false, 0f);
+    public static readonly LeashIntent Idle = new(0f, 0f, false, 0f, false, false, 0f);
 }
 
 internal sealed class LeashMotionEngine
@@ -144,10 +131,7 @@ internal sealed class LeashMotionEngine
             hasTurnInput ? turnValue : 0f,
             hasTurnInput,
             verticalModeActive,
-            settings.TurningEnabled && verticalModeActive,
-            verticalModeActive,
-            verticalModeActive ? signal.NetY * settings.VerticalMultiplier : 0f,
-            signal.VerticalAngle);
+            verticalModeActive ? signal.NetY * settings.VerticalMultiplier : 0f);
     }
 
     private (float X, float Z) ResolveHorizontalMovement(LeashSignal signal, LeashSettings settings, float deltaTime)

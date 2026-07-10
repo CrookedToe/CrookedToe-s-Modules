@@ -12,6 +12,8 @@ internal sealed class LeashTraceRecorder : IDisposable
     private StreamWriter? _writer;
     private DateTime _lastSampleAt;
     private DateTime _lastFlushAt;
+    private bool _activityKnown;
+    private bool _wasActive;
     private bool _failed;
 
     public void SetEnabled(bool enabled, Action<string> log)
@@ -26,19 +28,33 @@ internal sealed class LeashTraceRecorder : IDisposable
         _failed = false;
     }
 
+    public bool ShouldSample(bool active)
+    {
+        if (_writer is null)
+            return false;
+
+        DateTime now = DateTime.UtcNow;
+        bool activityChanged = !_activityKnown || active != _wasActive;
+        _activityKnown = true;
+        _wasActive = active;
+
+        if (!activityChanged && (!active || now - _lastSampleAt < SampleInterval))
+            return false;
+
+        _lastSampleAt = now;
+        return true;
+    }
+
     public void Record(object frame, Action<string> log)
     {
         if (_writer is null)
             return;
 
         DateTime now = DateTime.UtcNow;
-        if (now - _lastSampleAt < SampleInterval)
-            return;
 
         try
         {
             _writer.WriteLine(JsonSerializer.Serialize(frame, JsonOptions));
-            _lastSampleAt = now;
             if (now - _lastFlushAt >= FlushInterval)
             {
                 _writer.Flush();
@@ -72,6 +88,8 @@ internal sealed class LeashTraceRecorder : IDisposable
             _writer = new StreamWriter(path, append: false);
             _lastSampleAt = DateTime.MinValue;
             _lastFlushAt = DateTime.UtcNow;
+            _activityKnown = false;
+            _wasActive = false;
             log($"OSC Leash trace recording to {path}");
         }
         catch (Exception ex)

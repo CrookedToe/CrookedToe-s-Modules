@@ -104,7 +104,7 @@ Existing VRCOSC values for the legacy movement, deadzone, smoothing, and gravity
 %LOCALAPPDATA%\VRCOSC\OSCLeash\Debug
 ```
 
-The trace is sampled at 10 Hz and flushed once per second so recording does not dominate the 8 ms movement loop.
+The trace records state transitions plus active movement and height return at 10 Hz, and flushes once per second. Idle periods are omitted after their initial state transition so recording does not dominate the 8 ms movement loop or produce unnecessarily large files.
 
 ## Troubleshooting
 

@@ -211,8 +211,9 @@ public class OSCLeashModule : Module
         UpdateVerticalMotion(intent, grabbedForMotion, justGrabbed, justReleased, deltaTime, now);
 
         Player? player = GetClient().Player;
-        MovementCommand command = player is null ? MovementCommand.None : ApplyMovement(player, intent, grabbedForMotion);
-        RecordTrace(signal, intent, command, grabbedForMotion);
+        if (player is not null)
+            ApplyMovement(player, intent, grabbedForMotion);
+        RecordTrace(signal, intent, grabbedForMotion);
     }
 
     private float GetDeltaTime(long now)
@@ -347,7 +348,7 @@ public class OSCLeashModule : Module
             if (SecondsSince(_grabbedAtTimestamp, now) < LeashDefaults.VerticalCooldownSeconds)
                 return;
 
-            if (!intent.ShouldApplyVerticalPull)
+            if (!intent.VerticalModeActive)
             {
                 _verticalMotion.Rebase(_openVr.LastAppliedOffset);
                 _verticalMotion.Stop();
@@ -448,15 +449,15 @@ public class OSCLeashModule : Module
         return true;
     }
 
-    private MovementCommand ApplyMovement(Player player, LeashIntent intent, bool grabbedForMotion)
+    private void ApplyMovement(Player player, LeashIntent intent, bool grabbedForMotion)
     {
         if (!grabbedForMotion)
         {
             player.StopRun();
             player.MoveVertical(0f);
             player.MoveHorizontal(0f);
-            bool turnWritten = ReleaseTurnInput(player);
-            return new MovementCommand(false, 0f, 0f, turnWritten, 0f);
+            ReleaseTurnInput(player);
+            return;
         }
 
         if (intent.ShouldRun)
@@ -471,21 +472,19 @@ public class OSCLeashModule : Module
         {
             player.LookHorizontal(intent.TurnValue);
             _turnInputActive = true;
-            return new MovementCommand(intent.ShouldRun, intent.MoveZ, intent.MoveX, true, intent.TurnValue);
+            return;
         }
 
-        bool releasedTurn = ReleaseTurnInput(player);
-        return new MovementCommand(intent.ShouldRun, intent.MoveZ, intent.MoveX, releasedTurn, 0f);
+        ReleaseTurnInput(player);
     }
 
-    private bool ReleaseTurnInput(Player player)
+    private void ReleaseTurnInput(Player player)
     {
         if (!_turnInputActive)
-            return false;
+            return;
 
         player.LookHorizontal(0f);
         _turnInputActive = false;
-        return true;
     }
 
     private void ResetPlayerInput()
@@ -501,9 +500,16 @@ public class OSCLeashModule : Module
         _turnInputActive = false;
     }
 
-    private void RecordTrace(LeashSignal signal, LeashIntent intent, MovementCommand command, bool grabbedForMotion)
+    private void RecordTrace(LeashSignal signal, LeashIntent intent, bool grabbedForMotion)
     {
         if (!_settings.DebugTraceEnabled)
+            return;
+
+        bool returningHeight = !grabbedForMotion &&
+                               _settings.ReturnHeightOnRelease &&
+                               (MathF.Abs(_verticalMotion.Offset) > LeashDefaults.NormalizeEpsilon ||
+                                MathF.Abs(_verticalMotion.Velocity) > LeashDefaults.NormalizeEpsilon);
+        if (!_trace.ShouldSample(grabbedForMotion || returningHeight))
             return;
 
         _trace.Record(new
@@ -525,7 +531,6 @@ public class OSCLeashModule : Module
             },
             Signal = signal,
             Intent = intent,
-            Output = command,
             Vertical = new
             {
                 _verticalMotion.Offset,
