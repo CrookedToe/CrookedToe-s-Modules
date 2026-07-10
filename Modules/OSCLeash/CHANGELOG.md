@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Fixed
+- Yield to external OpenVR standing-pose writers instead of fighting OVRAS
+- Automatically rebase and resume after a one-time or completed OVRAS pose change
+- Use working-pose preview rather than committing chaperone state during motion
+- Restore neutral VRChat movement and turn inputs when the module stops
+- Keep cleanup ownership state across transient OpenVR failures
+- Continue OpenVR maintenance when the VRChat player object is unavailable
+- Restore existing configurable movement, vertical, turning, and return settings
+- Prevent smoothed movement from exceeding the current leash pull or lingering after an axis reaches zero
+- Brake immediately on direction reversal and require a stable opposite pull before moving back
+
+### Changed
+- Bound height drag with a configurable maximum distance
+- Split movement, vertical physics, OpenVR ownership, and trace recording into focused components
+- Sample and buffer debug traces to reduce update-loop overhead
+
+### Added
+- Regression tests for external pose ownership, safe cleanup, smoothing, and bounded return motion
+
 ## [0.2.3] - 2025-01-13
 
 ### Changed

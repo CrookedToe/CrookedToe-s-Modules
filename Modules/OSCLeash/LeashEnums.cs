@@ -19,8 +19,8 @@ public enum OSCLeashSetting
 {
     LeashDirection, WalkDeadzone, RunDeadzone, StrengthMultiplier,
     UpDownDeadzone, UpDownCompensation, MovementSmoothing,
-    TurningEnabled, TurningMultiplier, TurningDeadzone, TurningGoal,
+    TurningEnabled, TurningMultiplier, TurningDeadzone, TurningGoal, TurningVerticalAngleLimit,
     VerticalMovementEnabled, VerticalMovementMultiplier, VerticalMovementDeadzone,
     VerticalMovementSmoothing, VerticalHorizontalCompensation, GrabBasedGravity,
-    GravityStrength, TerminalVelocity
+    GravityStrength, TerminalVelocity, DebugTraceEnabled, MaximumVerticalOffset
 }
