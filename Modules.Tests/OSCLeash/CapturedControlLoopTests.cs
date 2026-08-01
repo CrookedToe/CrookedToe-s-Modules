@@ -21,6 +21,7 @@ public sealed class CapturedControlLoopTests
         foreach (TraceSequence sequence in fixture.Sequences)
         {
             var engine = new LeashMotionEngine();
+            var verticalMotion = new VerticalMotionState();
             LeashSettings settings = CreateSettings(sequence);
             ReplayFrame? previous = null;
 
@@ -30,7 +31,7 @@ public sealed class CapturedControlLoopTests
                 for (int repeat = 0; repeat < frame.Repeat; repeat++)
                 {
                     LeashSignal signal = LeashSignal.From(frame.NetX, frame.NetY, frame.NetZ, frame.Stretch);
-                    LeashIntent intent = engine.Resolve(signal, settings, frame.Grabbed, frame.DeltaSeconds);
+                    LeashIntent intent = engine.Resolve(signal, settings, frame.Grabbed);
                     string context = $"{sequence.Name} ({sequence.Source}), replay frame {replayedFrames}";
 
                     Assert.IsTrue(float.IsFinite(intent.MoveX), $"Non-finite X output: {context}");
@@ -48,10 +49,15 @@ public sealed class CapturedControlLoopTests
                     {
                         Assert.AreEqual(0f, intent.MoveX, Epsilon, $"X did not stop: {context}");
                         Assert.AreEqual(0f, intent.MoveZ, Epsilon, $"Z did not stop: {context}");
+                        Assert.IsFalse(intent.VerticalModeActive, $"Height mode ignored stretch/release: {context}");
+                        Assert.AreEqual(0f, intent.VerticalTargetVelocity, Epsilon, $"Height did not stop: {context}");
                     }
 
                     if (frame.Grabbed)
-                        Assert.AreEqual(signal.Stretch > settings.RunDeadzone, intent.ShouldRun, $"Run threshold mismatch: {context}");
+                        Assert.AreEqual(
+                            movementMagnitude > Epsilon && signal.Stretch > settings.RunDeadzone,
+                            intent.ShouldRun,
+                            $"Run threshold mismatch: {context}");
                     else
                         Assert.AreEqual(LeashIntent.Idle, intent, $"Released leash was not idle: {context}");
 
@@ -67,7 +73,15 @@ public sealed class CapturedControlLoopTests
                         verticalModeFrames++;
                         Assert.IsFalse(intent.HasTurnInput, $"Vertical pull also commanded turning: {context}");
                         Assert.IsTrue(intent.VerticalTargetVelocity * signal.NetY >= -Epsilon, $"Height direction mismatch: {context}");
+                        verticalMotion.ApplyPull(
+                            intent.VerticalTargetVelocity,
+                            frame.DeltaSeconds,
+                            settings.MaximumVerticalOffset);
                     }
+
+                    Assert.IsTrue(
+                        MathF.Abs(verticalMotion.Offset) <= settings.MaximumVerticalOffset + Epsilon,
+                        $"Integrated height exceeded its limit: {context}");
 
                     if (!settings.TurningEnabled)
                         Assert.IsFalse(intent.HasTurnInput, $"Turning was disabled: {context}");
@@ -76,9 +90,9 @@ public sealed class CapturedControlLoopTests
                     {
                         directReversals++;
                         if (AxisReversed(previous.Value.NetX, frame.NetX))
-                            Assert.AreEqual(0f, intent.MoveX, Epsilon, $"X reversal did not brake first: {context}");
+                            Assert.IsTrue(intent.MoveX * frame.NetX > 0f, $"X reversal was not applied immediately: {context}");
                         if (AxisReversed(previous.Value.NetZ, frame.NetZ))
-                            Assert.AreEqual(0f, intent.MoveZ, Epsilon, $"Z reversal did not brake first: {context}");
+                            Assert.IsTrue(intent.MoveZ * frame.NetZ > 0f, $"Z reversal was not applied immediately: {context}");
                     }
 
                     previous = frame;

@@ -122,10 +122,58 @@ internal sealed class PoseOwnershipTracker
     }
 }
 
+internal interface IStandingPoseBackend
+{
+    bool TryRead(out HmdMatrix34_t pose);
+    bool TryPreview(HmdMatrix34_t pose);
+}
+
+internal sealed class OpenVrStandingPoseBackend : IStandingPoseBackend
+{
+    public bool TryRead(out HmdMatrix34_t pose)
+    {
+        pose = new HmdMatrix34_t();
+        try
+        {
+            CVRChaperoneSetup? setup = OpenVR.ChaperoneSetup;
+            return setup is not null &&
+                   setup.GetWorkingStandingZeroPoseToRawTrackingPose(ref pose);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public bool TryPreview(HmdMatrix34_t pose)
+    {
+        try
+        {
+            CVRChaperoneSetup? setup = OpenVR.ChaperoneSetup;
+            if (setup is null)
+                return false;
+
+            setup.SetWorkingStandingZeroPoseToRawTrackingPose(ref pose);
+            setup.ShowWorkingSetPreview();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
 internal sealed class OpenVrPoseCoordinator
 {
     private readonly PoseOwnershipTracker _ownership = new();
+    private readonly IStandingPoseBackend _backend;
     private bool _connected;
+
+    public OpenVrPoseCoordinator(IStandingPoseBackend? backend = null)
+    {
+        _backend = backend ?? new OpenVrStandingPoseBackend();
+    }
 
     public bool Connected => _connected;
     public bool OwnsPose => _ownership.OwnsPose;
@@ -245,50 +293,23 @@ internal sealed class OpenVrPoseCoordinator
 
     private PoseUpdateResult PreviewPose(HmdMatrix34_t pose, float appliedOffset)
     {
-        try
-        {
-            CVRChaperoneSetup? setup = OpenVR.ChaperoneSetup;
-            if (setup is null)
-            {
-                _connected = false;
-                return PoseUpdateResult.OpenVrUnavailable;
-            }
-
-            setup.SetWorkingStandingZeroPoseToRawTrackingPose(ref pose);
-            _ownership.AcceptWrite(pose, appliedOffset);
-            setup.ShowWorkingSetPreview();
-            return PoseUpdateResult.Success;
-        }
-        catch
+        if (!_backend.TryPreview(pose))
         {
             _connected = false;
             return PoseUpdateResult.WriteFailed;
         }
+
+        _ownership.AcceptWrite(pose, appliedOffset);
+        return PoseUpdateResult.Success;
     }
 
     private PoseUpdateResult TryRead(out HmdMatrix34_t pose)
     {
-        pose = new HmdMatrix34_t();
-        try
-        {
-            CVRChaperoneSetup? setup = OpenVR.ChaperoneSetup;
-            if (setup is null)
-            {
-                _connected = false;
-                return PoseUpdateResult.OpenVrUnavailable;
-            }
+        if (_backend.TryRead(out pose))
+            return PoseUpdateResult.Success;
 
-            if (setup.GetWorkingStandingZeroPoseToRawTrackingPose(ref pose))
-                return PoseUpdateResult.Success;
-
-            _connected = false;
-            return PoseUpdateResult.ReadFailed;
-        }
-        catch
-        {
-            _connected = false;
-            return PoseUpdateResult.ReadFailed;
-        }
+        _connected = false;
+        return PoseUpdateResult.ReadFailed;
     }
 
 }

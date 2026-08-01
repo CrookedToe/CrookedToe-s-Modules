@@ -32,7 +32,7 @@ This prevents sustained writer-versus-writer jitter, preserves stable OVRAS offs
 ## Installation
 
 1. Enable the module in VRCOSC.
-2. Import `OSCLeash.prefab` from the release into the Unity avatar project.
+2. Download and import the OSCLeash setup package attached to the [latest GitHub release](https://github.com/CrookedToe/CrookedToe-s-Modules/releases/latest).
 3. Place the prefab at the avatar root, not under the armature.
 4. Assign the first leash bone to `Leash Start Bone`.
 5. Run Auto Setup.
@@ -62,9 +62,13 @@ This prevents sustained writer-versus-writer jitter, preserves stable OVRAS offs
 | Run Start | 0.70 | Leash stretch required before running starts |
 | Pull Strength | 1.2 | How strongly pull maps to movement speed |
 
-Movement smoothing applies only while acceleration is increasing. If the leash pull weakens or reaches zero, movement input brakes immediately instead of decaying from an older, stronger command. Direction reversals output zero until the opposite pull remains stable for 120 ms, preventing rapid forward/back or left/right correction loops.
+Movement uses the current leash signal directly on one 16 ms control loop. There is no movement smoothing, reversal timer, or separate output rate. Weakening, stopping, and direction changes therefore take effect on the next update.
 
 Combined horizontal input is capped to a unit circle so diagonal pulls cannot command more total movement than straight pulls.
+
+The complete movement state is sent on every healthy update to repair missed input naturally. If VRChat rejects a command, the rest of that update's shared command batch is skipped and retries use a bounded 100 ms to 2 second backoff. This prevents a disconnected or unhealthy client from producing several exceptions every 16 ms.
+
+If avatar OSC input stops arriving for more than two seconds, movement is neutralized. When the leash had been grabbed, a release followed by a new grab is required before movement resumes; this prevents an old grabbed state from becoming active again after an OSC interruption.
 
 ### Turning
 
@@ -85,11 +89,14 @@ Comfort turning in VRChat can alter or suppress the resulting turn input.
 | Height Limit | 3 m | Safety bound from the position where the leash was grabbed |
 | Return Height on Release | false | Returns to the original grab height after release |
 
-Smoothing, vertical compensation, turn activation, and height-return physics use tested internal values. They are intentionally not exposed because changing them can make the control loop unstable or difficult to understand. Existing saved values for the ten retained settings continue to use their original keys.
+Height drag uses that same control loop and applies the current vertical pull directly. It requires the leash to pass Move Start and scales height speed by current stretch, so merely rotating or grabbing an unstretched leash cannot move the playspace. There is no grab cooldown, vertical smoothing, or queued lower-rate OpenVR write. Return Height accelerates smoothly toward the grab height, capped by the configured Height Speed, and stops exactly at the target. Existing saved values for the ten retained settings continue to use their original keys.
+
+The module emits one debug health summary per minute from that same control loop. It does not add a second update cadence for OpenVR or diagnostics.
 
 ## Troubleshooting
 
 - **No movement:** Confirm OSC is enabled, VRCOSC is running, and parameter names and capitalization match.
+- **Movement stopped after an OSC interruption:** Release and re-grab the leash. The stale-input safety latch intentionally rejects an old held state.
 - **No height drag:** Confirm SteamVR is active and `Enable Height Drag` is on.
 - **Waiting for OpenVR pose warning:** OVRAS is moving the shared standing pose. Height drag resumes automatically after it is stable for 250 ms.
 - **Height drag suspended warning:** OVRAS continued overwriting the automatic retry. Stop the active OVRAS motion, then release and grab the leash again.

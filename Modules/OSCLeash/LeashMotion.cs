@@ -2,31 +2,26 @@ namespace CrookedToe.Modules.OSCLeash;
 
 internal static class LeashDefaults
 {
-    public const int UpdateIntervalMilliseconds = 8;
-    public const float BaseDeltaTimeSeconds = 0.008f;
+    public const int UpdateIntervalMilliseconds = 16;
+    public const float UpdateIntervalSeconds = UpdateIntervalMilliseconds / 1000f;
     public const float MaxDeltaTimeSeconds = 0.05f;
-    public const float VrWriteIntervalSeconds = 1f / 30f;
     public const float ExternalPoseQuietSeconds = 0.25f;
     public const float VrRetryIntervalSeconds = 2f;
-    public const float VerticalCooldownSeconds = 1f;
-    public const float StopThreshold = 0.01f;
-    public const float VelocityStopThreshold = 0.1f;
+    public const float InputFreshnessSeconds = 2f;
+    public const float PlayerRetryInitialSeconds = 0.1f;
+    public const float PlayerRetryMaximumSeconds = 2f;
+    public const float HealthLogIntervalSeconds = 60f;
     public const float TurnEpsilon = 0.0001f;
     public const float NormalizeEpsilon = 0.0001f;
-    public const float DirectionChangeHoldSeconds = 0.12f;
-    public const float AngleHysteresisDegrees = 5f;
-    public const float DeadzoneHysteresisFactor = 0.8f;
-    public const float MovementSmoothing = 0.7f;
     public const float VerticalCompensationThreshold = 0.5f;
     public const float VerticalCompensationStrength = 0.5f;
     public const float TurnDeadzone = 0.15f;
     public const float TurnStartAngleDegrees = 20f;
     public const float TurnVerticalLimitDegrees = 45f;
     public const float HeightDeadzone = 0.15f;
-    public const float HeightSmoothing = 0.8f;
     public const float HeightActivationAngleDegrees = 45f;
+    public const float HeightExitAngleDegrees = 40f;
     public const float ReturnAcceleration = 9.81f;
-    public const float ReturnMaximumSpeed = 15f;
 }
 
 internal readonly record struct LeashSettings(
@@ -39,7 +34,25 @@ internal readonly record struct LeashSettings(
     bool VerticalEnabled,
     bool ReturnHeightOnRelease,
     float VerticalMultiplier,
-    float MaximumVerticalOffset);
+    float MaximumVerticalOffset)
+{
+    public LeashSettings Sanitize()
+    {
+        float walkDeadzone = ClampFinite(WalkDeadzone, 0f, 1f, 0.15f);
+        return this with
+        {
+            WalkDeadzone = walkDeadzone,
+            RunDeadzone = ClampFinite(RunDeadzone, walkDeadzone, 1f, MathF.Max(0.7f, walkDeadzone)),
+            StrengthMultiplier = ClampFinite(StrengthMultiplier, 0.1f, 5f, 1.2f),
+            TurningMultiplier = ClampFinite(TurningMultiplier, 0.1f, 2f, 0.8f),
+            VerticalMultiplier = ClampFinite(VerticalMultiplier, 0.1f, 5f, 1f),
+            MaximumVerticalOffset = ClampFinite(MaximumVerticalOffset, 0.25f, 20f, 3f)
+        };
+    }
+
+    private static float ClampFinite(float value, float min, float max, float fallback)
+        => float.IsFinite(value) ? Math.Clamp(value, min, max) : fallback;
+}
 
 internal readonly record struct LeashSignal(
     float NetX,
@@ -96,21 +109,13 @@ internal readonly record struct LeashIntent(
 
 internal sealed class LeashMotionEngine
 {
-    private readonly NonOvershootingAxisFilter _moveX = new();
-    private readonly NonOvershootingAxisFilter _moveZ = new();
     private bool _verticalModeActive;
-    private bool _turnModeActive;
 
-    public void Reset()
-    {
-        _moveX.Reset();
-        _moveZ.Reset();
-        _verticalModeActive = false;
-        _turnModeActive = false;
-    }
+    public void Reset() => _verticalModeActive = false;
 
-    public LeashIntent Resolve(LeashSignal signal, LeashSettings settings, bool grabbedForMotion, float deltaTime)
+    public LeashIntent Resolve(LeashSignal signal, LeashSettings settings, bool grabbedForMotion)
     {
+        settings = settings.Sanitize();
         if (!grabbedForMotion)
         {
             Reset();
@@ -118,29 +123,32 @@ internal sealed class LeashMotionEngine
         }
 
         bool verticalModeActive = ResolveVerticalMode(signal, settings);
-        (float moveX, float moveZ) = ResolveHorizontalMovement(signal, settings, deltaTime);
-        bool turningAllowed = ResolveTurnMode(signal, settings, verticalModeActive);
+        (float moveX, float moveZ) = ResolveHorizontalMovement(signal, settings);
+        bool hasMovement = MathF.Sqrt((moveX * moveX) + (moveZ * moveZ)) > LeashDefaults.NormalizeEpsilon;
+        bool turningAllowed = settings.TurningEnabled &&
+                              !verticalModeActive &&
+                              signal.HasHorizontalDirection &&
+                              signal.Stretch > LeashDefaults.TurnDeadzone &&
+                              signal.VerticalAngle <= LeashDefaults.TurnVerticalLimitDegrees;
         float turnValue = turningAllowed ? CalculateTurning(signal, settings) : 0f;
         bool hasTurnInput = MathF.Abs(turnValue) > LeashDefaults.TurnEpsilon;
 
         return new LeashIntent(
             moveX,
             moveZ,
-            signal.Stretch > settings.RunDeadzone,
+            hasMovement && signal.Stretch > settings.RunDeadzone,
             hasTurnInput ? turnValue : 0f,
             hasTurnInput,
             verticalModeActive,
-            verticalModeActive ? signal.NetY * settings.VerticalMultiplier : 0f);
+            verticalModeActive
+                ? signal.NetY * signal.Stretch * settings.VerticalMultiplier
+                : 0f);
     }
 
-    private (float X, float Z) ResolveHorizontalMovement(LeashSignal signal, LeashSettings settings, float deltaTime)
+    private static (float X, float Z) ResolveHorizontalMovement(LeashSignal signal, LeashSettings settings)
     {
         if (signal.Stretch <= settings.WalkDeadzone)
-        {
-            _moveX.Reset();
-            _moveZ.Reset();
             return (0f, 0f);
-        }
 
         float netX = signal.NetX;
         float netZ = signal.NetZ;
@@ -155,11 +163,7 @@ internal sealed class LeashMotionEngine
         }
 
         float strength = signal.Stretch * settings.StrengthMultiplier;
-        (float targetX, float targetZ) = ClampToUnitCircle(netX * strength, netZ * strength);
-
-        return (
-            _moveX.Update(targetX, LeashDefaults.MovementSmoothing, deltaTime),
-            _moveZ.Update(targetZ, LeashDefaults.MovementSmoothing, deltaTime));
+        return ClampToUnitCircle(netX * strength, netZ * strength);
     }
 
     private static (float X, float Z) ClampToUnitCircle(float x, float z)
@@ -176,38 +180,19 @@ internal sealed class LeashMotionEngine
 
     private bool ResolveVerticalMode(LeashSignal signal, LeashSettings settings)
     {
-        if (!settings.VerticalEnabled)
+        if (!settings.VerticalEnabled ||
+            signal.Stretch <= settings.WalkDeadzone ||
+            signal.VerticalMagnitude < LeashDefaults.HeightDeadzone)
         {
             _verticalModeActive = false;
             return false;
         }
 
-        float exitAngle = LeashDefaults.HeightActivationAngleDegrees - LeashDefaults.AngleHysteresisDegrees;
-        float exitDeadzone = LeashDefaults.HeightDeadzone * LeashDefaults.DeadzoneHysteresisFactor;
-        _verticalModeActive = _verticalModeActive
-            ? signal.VerticalAngle >= exitAngle && signal.VerticalMagnitude >= exitDeadzone
-            : signal.VerticalAngle >= LeashDefaults.HeightActivationAngleDegrees &&
-              signal.VerticalMagnitude >= LeashDefaults.HeightDeadzone;
-
+        float minimumAngle = _verticalModeActive
+            ? LeashDefaults.HeightExitAngleDegrees
+            : LeashDefaults.HeightActivationAngleDegrees;
+        _verticalModeActive = signal.VerticalAngle >= minimumAngle;
         return _verticalModeActive;
-    }
-
-    private bool ResolveTurnMode(LeashSignal signal, LeashSettings settings, bool verticalModeActive)
-    {
-        if (!settings.TurningEnabled || verticalModeActive || !signal.HasHorizontalDirection)
-        {
-            _turnModeActive = false;
-            return false;
-        }
-
-        float exitAngle = LeashDefaults.TurnVerticalLimitDegrees + LeashDefaults.AngleHysteresisDegrees;
-        float exitDeadzone = LeashDefaults.TurnDeadzone * LeashDefaults.DeadzoneHysteresisFactor;
-        _turnModeActive = _turnModeActive
-            ? signal.Stretch > exitDeadzone && signal.VerticalAngle <= exitAngle
-            : signal.Stretch > LeashDefaults.TurnDeadzone &&
-              signal.VerticalAngle <= LeashDefaults.TurnVerticalLimitDegrees;
-
-        return _turnModeActive;
     }
 
     private static float CalculateTurning(LeashSignal signal, LeashSettings settings)
@@ -237,156 +222,75 @@ internal sealed class LeashMotionEngine
             -1f,
             1f);
     }
-
-    internal static float SmoothingAlpha(float smoothing, float deltaTime)
-    {
-        if (smoothing <= 0f)
-            return 1f;
-        if (smoothing >= 1f)
-            return 0f;
-
-        return 1f - MathF.Pow(smoothing, deltaTime / LeashDefaults.BaseDeltaTimeSeconds);
-    }
-}
-
-internal sealed class NonOvershootingAxisFilter
-{
-    private float _output;
-    private int _acceptedDirection;
-    private int _pendingDirection;
-    private float _pendingDuration;
-    private float _neutralDuration;
-
-    public void Reset()
-    {
-        _output = 0f;
-        _acceptedDirection = 0;
-        _pendingDirection = 0;
-        _pendingDuration = 0f;
-        _neutralDuration = 0f;
-    }
-
-    public float Update(float target, float smoothing, float deltaTime)
-    {
-        target = float.IsFinite(target) ? Math.Clamp(target, -1f, 1f) : 0f;
-        int targetDirection = MathF.Abs(target) <= LeashDefaults.NormalizeEpsilon ? 0 : Math.Sign(target);
-
-        if (targetDirection == 0)
-        {
-            _output = 0f;
-            _pendingDirection = 0;
-            _pendingDuration = 0f;
-            _neutralDuration += deltaTime;
-            if (_neutralDuration >= LeashDefaults.DirectionChangeHoldSeconds)
-                _acceptedDirection = 0;
-            return 0f;
-        }
-
-        _neutralDuration = 0f;
-        if (_acceptedDirection == 0)
-        {
-            _acceptedDirection = targetDirection;
-            _pendingDirection = 0;
-            _pendingDuration = 0f;
-        }
-        else if (targetDirection != _acceptedDirection)
-        {
-            _output = 0f;
-            if (_pendingDirection != targetDirection)
-            {
-                _pendingDirection = targetDirection;
-                _pendingDuration = 0f;
-            }
-
-            _pendingDuration += deltaTime;
-            if (_pendingDuration < LeashDefaults.DirectionChangeHoldSeconds)
-                return 0f;
-
-            _acceptedDirection = targetDirection;
-            _pendingDirection = 0;
-            _pendingDuration = 0f;
-        }
-        else
-        {
-            _pendingDirection = 0;
-            _pendingDuration = 0f;
-        }
-
-        float alpha = LeashMotionEngine.SmoothingAlpha(smoothing, deltaTime);
-        float next = _output + ((target - _output) * alpha);
-
-        // Smoothing is attack-only. When the pull weakens, brake immediately instead
-        // of continuing to command more movement than the current leash signal asks for.
-        if (MathF.Abs(next) > MathF.Abs(target))
-            next = target;
-        if (Math.Sign(next) != targetDirection)
-            next = 0f;
-
-        _output = next;
-        return _output;
-    }
 }
 
 internal sealed class VerticalMotionState
 {
+    private float _returnSpeed;
+
     public float Offset { get; private set; }
-    public float Velocity { get; private set; }
 
     public void Reset()
     {
         Offset = 0f;
-        Velocity = 0f;
+        _returnSpeed = 0f;
     }
-
-    public void Stop() => Velocity = 0f;
 
     public void Rebase(float offset)
     {
-        Offset = offset;
-        Velocity = 0f;
+        Offset = float.IsFinite(offset) ? offset : 0f;
+        _returnSpeed = 0f;
     }
 
-    public bool ApplyPull(float targetVelocity, float smoothing, float deltaTime, float maximumOffset)
+    public bool ApplyPull(float targetVelocity, float deltaTime, float maximumOffset)
     {
-        float alpha = LeashMotionEngine.SmoothingAlpha(smoothing, deltaTime);
-        Velocity += (targetVelocity - Velocity) * alpha;
+        targetVelocity = float.IsFinite(targetVelocity) ? targetVelocity : 0f;
+        deltaTime = ClampDeltaTime(deltaTime);
+        maximumOffset = float.IsFinite(maximumOffset) ? MathF.Max(0f, maximumOffset) : 0f;
 
         float previousOffset = Offset;
-        Offset = Math.Clamp(Offset + (Velocity * deltaTime), -maximumOffset, maximumOffset);
-        if (MathF.Abs(Offset) >= maximumOffset && MathF.Sign(Velocity) == MathF.Sign(Offset))
-            Velocity = 0f;
-
+        Offset = Math.Clamp(Offset + (targetVelocity * deltaTime), -maximumOffset, maximumOffset);
         return Offset != previousOffset;
     }
 
-    public bool ReturnToOrigin(float gravityStrength, float terminalVelocity, float deltaTime)
+    public bool Constrain(float maximumOffset)
     {
-        if (MathF.Abs(Offset) < LeashDefaults.StopThreshold &&
-            MathF.Abs(Velocity) < LeashDefaults.VelocityStopThreshold)
-        {
-            bool changed = Offset != 0f || Velocity != 0f;
-            Reset();
-            return changed;
-        }
+        maximumOffset = float.IsFinite(maximumOffset) ? MathF.Max(0f, maximumOffset) : 0f;
+        float constrained = Math.Clamp(Offset, -maximumOffset, maximumOffset);
+        if (constrained == Offset)
+            return false;
 
-        float direction = -MathF.Sign(Offset);
-        if (direction == 0f)
-        {
-            Reset();
-            return true;
-        }
-
-        Velocity = Math.Clamp(Velocity + (gravityStrength * direction * deltaTime), -terminalVelocity, terminalVelocity);
-        float nextOffset = Offset + (Velocity * deltaTime);
-        if (MathF.Sign(nextOffset) != MathF.Sign(Offset))
-        {
-            Reset();
-            return true;
-        }
-
-        Offset = nextOffset;
+        Offset = constrained;
+        _returnSpeed = 0f;
         return true;
     }
+
+    public bool ReturnToOrigin(float acceleration, float maximumSpeed, float deltaTime)
+    {
+        acceleration = float.IsFinite(acceleration) ? MathF.Max(0f, acceleration) : 0f;
+        maximumSpeed = float.IsFinite(maximumSpeed) ? MathF.Max(0f, maximumSpeed) : 0f;
+        deltaTime = ClampDeltaTime(deltaTime);
+        if (Offset == 0f || acceleration == 0f || maximumSpeed == 0f || deltaTime == 0f)
+            return false;
+
+        _returnSpeed = MathF.Min(
+            _returnSpeed + (acceleration * deltaTime),
+            maximumSpeed);
+        float step = _returnSpeed * deltaTime;
+        if (MathF.Abs(Offset) <= step)
+        {
+            Reset();
+            return true;
+        }
+
+        Offset -= MathF.Sign(Offset) * step;
+        return true;
+    }
+
+    private static float ClampDeltaTime(float deltaTime)
+        => float.IsFinite(deltaTime)
+            ? Math.Clamp(deltaTime, 0f, LeashDefaults.MaxDeltaTimeSeconds)
+            : 0f;
 }
 
 internal sealed class ExternalPoseRecoveryState

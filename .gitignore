@@ -54,9 +54,10 @@ CrookedToesModules.sln
 
 /Resources/
 
-.cursorrules
+#.cursorrules
 .mdc
-.cursor/rules/modulehowto.mdc
-
-.VRCOSC-Modules-main/
-.cursor/rules/modulehowto.md
+.Agent/rules/modulehowto.mdc
+.Agent/rules/modulehowto.md
+#official_Modules/
+official_Modules/
+OpenVR-AdvancedSettings-master/
