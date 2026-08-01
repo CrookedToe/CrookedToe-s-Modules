@@ -10,6 +10,9 @@ A module for controlling leash physics in VRChat using OSC parameters. For more 
 ### OSCAudioReaction
 Captures your system's audio output and sends stereo direction and volume information to VRChat parameters for audio visualization. For more information, see the [OSCAudioReaction README](Modules/OSCAudioReaction/README.md).
 
+### OSCVoiceEmotion
+Analyzes VRCOSC's selected microphone locally with SenseVoiceSmall and publishes stable vocal-expression, laughter, crying, energy, confidence, and vocal-activity parameters. For setup and the important interpretation disclaimer, see the [OSCVoiceEmotion README](Modules/OSCVoiceEmotion/README.md).
+
 ## Installation
 
 1. enable CrookedToe's Modules in the packages
