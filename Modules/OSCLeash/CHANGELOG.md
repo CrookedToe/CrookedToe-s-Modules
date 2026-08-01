@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Fixed
+- Yield to external OpenVR standing-pose writers instead of fighting OVRAS
+- Automatically rebase and resume after a one-time or completed OVRAS pose change
+- Use working-pose preview rather than committing chaperone state during motion
+- Restore neutral VRChat movement and turn inputs when the module stops
+- Keep cleanup ownership state across transient OpenVR failures
+- Continue OpenVR maintenance when the VRChat player object is unavailable
+- Restore existing configurable movement, vertical, turning, and return settings
+- Apply lateral and vertical corrections directly from the current leash signal
+- Stop movement immediately at the deadzone or on release
+- Require stretch before height drag and scale vertical speed by current stretch
+- Retain and retry neutral VRChat inputs until every owned channel is released
+- Clear cached leash parameters on avatar and player lifecycle changes
+- Preserve OpenVR cleanup ownership after transient shutdown failures
+- Point prefab setup and documentation to the package attached to each GitHub release
+
+### Changed
+- Bound height drag with a configurable maximum distance
+- Split movement, vertical physics, and OpenVR ownership into focused components
+- Reduce the settings menu from 22 controls to 10 clearly named user choices
+- Use tested internal values for smoothing, compensation, turn gating, and height-return physics
+- Cap combined diagonal movement to the same maximum magnitude as straight movement
+- Use one 16 ms control loop for VRChat movement and OpenVR height writes
+- Remove movement smoothing, reversal timers, output rate gates, vertical write queues, and the height-drag grab cooldown
+- Replace threshold-heavy return gravity with a bounded accelerated return that stops exactly at the target
+
+### Added
+- Regression tests for external pose ownership, safe cleanup, smoothing, and bounded return motion
+- Trace-derived control-loop regression coverage for vertical pulls, diagonal ramps, reversals, and axis drops
+- Direct stop, reversal, vertical-limit, and captured-sequence regression coverage
+- Failure-injection coverage for VRChat input cleanup, avatar-state reset, OpenVR writes, and prefab integrity
+
+### Removed
+- Remove runtime debug trace recording after converting captured failure windows into regression fixtures
+
 ## [0.2.3] - 2025-01-13
 
 ### Changed

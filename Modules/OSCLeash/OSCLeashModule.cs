@@ -1,66 +1,35 @@
+using System.Diagnostics;
 using VRCOSC.App.SDK.Modules;
 using VRCOSC.App.SDK.Parameters;
 using VRCOSC.App.SDK.VRChat;
-using Valve.VR;
 
 namespace CrookedToe.Modules.OSCLeash;
 
-internal static class LeashConfig
-{
-    public const float DELTA_TIME = 0.008f;
-    public const float VERTICAL_COOLDOWN = 1.0f;
-    public const float STOP_THRESHOLD = 0.01f;
-    public const float VELOCITY_STOP_THRESHOLD = 0.1f;
-    public const float TURN_EPSILON = 0.0001f;
-    public const float NORMALIZE_EPSILON = 1e-4f;
-}
-
-internal struct CachedSettings
-{
-    public float WalkDeadzone, RunDeadzone, StrengthMultiplier;
-    public float UpDownDeadzone, UpDownCompensation, MovementSmoothing;
-    public LeashDirection Direction;
-    public bool TurningEnabled;
-    public float TurningMultiplier, TurningDeadzone, TurningGoal;
-    public bool VerticalEnabled, GravityEnabled;
-    public float VerticalMultiplier, VerticalDeadzone, VerticalSmoothing;
-    public float VerticalAngle, GravityStrength, TerminalVelocity;
-}
-
 [ModuleTitle("OSC Leash")]
-[ModuleDescription("Allows for controlling avatar movement with parameters, including vertical movement via OpenVR")]
+[ModuleDescription("Controls avatar movement from leash parameters, with optional OpenVR height drag")]
 [ModuleType(ModuleType.Generic)]
-[ModulePrefab("OSCLeash", "https://github.com/CrookedToe/OSCLeash/tree/main/Unity")]
+[ModulePrefab("OSCLeash", "https://github.com/CrookedToe/CrookedToe-s-Modules/releases/latest")]
 [ModuleInfo("https://github.com/CrookedToe/CrookedToe-s-Modules")]
 public class OSCLeashModule : Module
 {
-    private static readonly (OSCLeashSetting Key, string Name, string Desc, float Default, float Min, float Max)[] SliderSettings =
+    private static readonly (OSCLeashSetting Key, string Name, string Description, float Default, float Min, float Max)[] SliderSettings =
     [
-        (OSCLeashSetting.WalkDeadzone, "Walk Deadzone", "Minimum stretch to start walking", 0.15f, 0.0f, 1.0f),
-        (OSCLeashSetting.RunDeadzone, "Run Deadzone", "Stretch threshold for running", 0.70f, 0.0f, 1.0f),
-        (OSCLeashSetting.StrengthMultiplier, "Movement Strength", "Overall speed multiplier", 1.2f, 0.1f, 5.0f),
-        (OSCLeashSetting.UpDownDeadzone, "Up/Down Deadzone", "Vertical movement threshold", 0.5f, 0.0f, 1.0f),
-        (OSCLeashSetting.UpDownCompensation, "Up/Down Compensation", "Vertical effect on horizontal speed", 0.5f, 0.0f, 1.0f),
-        (OSCLeashSetting.MovementSmoothing, "Movement Smoothing", "Smoothing factor for horizontal movement", 0.7f, 0.0f, 0.95f),
-        (OSCLeashSetting.TurningMultiplier, "Turn Speed", "Rotation speed multiplier", 0.80f, 0.1f, 2.0f),
-        (OSCLeashSetting.TurningDeadzone, "Turn Deadzone", "Minimum stretch for turning", 0.15f, 0.0f, 1.0f),
-        (OSCLeashSetting.TurningGoal, "Minimum Turn Angle", "Minimum angle away from forward before turning starts", 20f, 0.0f, 90.0f),
-        (OSCLeashSetting.VerticalMovementMultiplier, "Vertical Speed", "Vertical movement speed multiplier", 1.0f, 0.1f, 5.0f),
-        (OSCLeashSetting.VerticalMovementDeadzone, "Vertical Deadzone", "Minimum vertical pull needed", 0.15f, 0.0f, 1.0f),
-        (OSCLeashSetting.VerticalMovementSmoothing, "Vertical Smoothing", "Smoothing factor for height changes", 0.8f, 0.0f, 1.0f),
-        (OSCLeashSetting.VerticalHorizontalCompensation, "Vertical Angle", "Required angle from horizontal", 45f, 15f, 75f),
-        (OSCLeashSetting.GravityStrength, "Gravity Strength", "Gravity acceleration", 9.81f, 0.1f, 50.0f),
-        (OSCLeashSetting.TerminalVelocity, "Terminal Velocity", "Maximum falling speed", 15.0f, 1.0f, 50.0f),
+        (OSCLeashSetting.WalkDeadzone, "Move Start", "How far the leash must stretch before movement starts", 0.15f, 0f, 1f),
+        (OSCLeashSetting.RunDeadzone, "Run Start", "How far the leash must stretch before running starts", 0.70f, 0f, 1f),
+        (OSCLeashSetting.StrengthMultiplier, "Pull Strength", "How strongly the leash controls movement speed", 1.2f, 0.1f, 5f),
+        (OSCLeashSetting.TurningMultiplier, "Turn Strength", "How strongly a side pull turns the avatar", 0.8f, 0.1f, 2f),
+        (OSCLeashSetting.VerticalMovementMultiplier, "Height Speed", "Maximum height-drag speed in meters per second", 1f, 0.1f, 5f),
+        (OSCLeashSetting.MaximumVerticalOffset, "Height Limit", "Maximum height distance from the position where the leash was grabbed", 3f, 0.25f, 20f)
     ];
 
-    private static readonly (OSCLeashSetting Key, string Name, string Desc, bool Default)[] ToggleSettings =
+    private static readonly (OSCLeashSetting Key, string Name, string Description, bool Default)[] ToggleSettings =
     [
-        (OSCLeashSetting.TurningEnabled, "Enable Turning", "Enables avatar rotation control", false),
-        (OSCLeashSetting.VerticalMovementEnabled, "Enable Vertical Movement", "Enables OpenVR height control", false),
-        (OSCLeashSetting.GrabBasedGravity, "Enable Gravity", "Return to grab height when released", false),
+        (OSCLeashSetting.TurningEnabled, "Allow Turning", "Allows side pulls to turn the avatar", false),
+        (OSCLeashSetting.VerticalMovementEnabled, "Allow Height Drag", "Allows vertical pulls to move the OpenVR playspace", false),
+        (OSCLeashSetting.GrabBasedGravity, "Return Height on Release", "Returns to the original grab height after the leash is released", false)
     ];
 
-    private static readonly (OSCLeashParameter Key, string Address, string Name, string Desc)[] FloatParameters =
+    private static readonly (OSCLeashParameter Key, string Address, string Name, string Description)[] FloatParameters =
     [
         (OSCLeashParameter.Stretch, "Leash_Stretch", "Leash Stretch", "How far the leash is stretched"),
         (OSCLeashParameter.ZPositive, "Leash_Z+", "Forward Pull", "Forward movement value"),
@@ -68,523 +37,549 @@ public class OSCLeashModule : Module
         (OSCLeashParameter.XPositive, "Leash_X+", "Right Pull", "Rightward movement value"),
         (OSCLeashParameter.XNegative, "Leash_X-", "Left Pull", "Leftward movement value"),
         (OSCLeashParameter.YPositive, "Leash_Y+", "Upward Pull", "Upward movement value"),
-        (OSCLeashParameter.YNegative, "Leash_Y-", "Downward Pull", "Downward movement value"),
+        (OSCLeashParameter.YNegative, "Leash_Y-", "Downward Pull", "Downward movement value")
     ];
 
-    private bool _isGrabbed;
-    private bool _leashEnabled = true;
-    private float _stretch;
-    private float _xPos, _xNeg, _yPos, _yNeg, _zPos, _zNeg;
-    private bool _isWalking, _isRunning;
-    
-    private float _vrVelocity;
-    private float _referenceHeight;
-    private float _currentVerticalOffset;
-    private HmdMatrix34_t _standingZeroPose;
-    private HmdMatrix34_t _initialStandingZeroPose;
-    private DateTime? _grabbedAt;
-    private bool _vrInitialized;
-    private bool _vrInitFailed;
-    
-    private float _smoothMoveX, _smoothMoveZ;
-    private bool _wasGrabbed;
-    
-    private CachedSettings _settings;
-    private Dictionary<OSCLeashParameter, Action<RegisteredParameter>>? _parameterHandlers;
+    private readonly LeashInputState _input = new();
+    private readonly LeashMotionEngine _motion = new();
+    private readonly PlayerInputController _playerInput = new();
+    private readonly VerticalMotionState _verticalMotion = new();
+    private readonly ExternalPoseRecoveryState _poseRecovery = new();
+    private readonly OpenVrPoseCoordinator _openVr = new();
 
-    private float NetX => _xPos - _xNeg;
-    private float NetY => _yNeg - _yPos;
-    private float NetZ => _zPos - _zNeg;
+    private bool _wasGrabbedForMotion;
+    private bool _isStopping;
+    private long _lastUpdateTimestamp;
+    private long _nextVrRetryTimestamp;
+    private long _nextPlayerRetryTimestamp;
+    private long _lastVrWarningTimestamp;
+    private long _lastPlayerWarningTimestamp;
+    private long _lastPlayerSuccessTimestamp;
+    private long _lastHealthLogTimestamp;
+    private int _consecutivePlayerFailures;
+    private bool _inputWasStale;
+    private PoseUpdateResult _lastLoggedVrResult = PoseUpdateResult.NoChange;
+    private LeashSettings _settings;
 
     protected override void OnPreLoad()
     {
-        Log("Initializing OSC Leash module...");
         CreateSettings();
-        RegisterAllParameters();
+        RegisterParameters();
         CreateSettingsGroups();
-        InitializeParameterHandlers();
     }
 
     protected override Task<bool> OnModuleStart()
     {
+        _isStopping = false;
+        ResetLeashState();
+        TryNeutralizePlayerInput(forceAll: true);
         Log("OSC Leash module started");
         return Task.FromResult(true);
     }
 
     protected override Task OnModuleStop()
     {
-        Log("Stopping OSC Leash module...");
-        CleanupVRResources();
-        ResetParametersToSafeValues();
-        ClearModuleState();
+        _isStopping = true;
+        TryNeutralizePlayerInput(forceAll: true);
+        PoseUpdateResult cleanupResult = _openVr.RemoveOwnOffset();
+        if (cleanupResult is not PoseUpdateResult.Success and not PoseUpdateResult.NoChange)
+            Log($"OSC Leash height cleanup: {cleanupResult}");
+
+        ClearState(clearOpenVrOwnership: cleanupResult is PoseUpdateResult.Success or PoseUpdateResult.NoChange);
         Log("OSC Leash module stopped");
         return Task.CompletedTask;
     }
 
-    private void CreateSettings()
+    protected override void OnAvatarChange(Avatar? avatar)
     {
-        foreach (var (key, name, desc, def, min, max) in SliderSettings)
-            CreateSlider(key, name, desc, def, min, max);
-        
-        foreach (var (key, name, desc, def) in ToggleSettings)
-            CreateToggle(key, name, desc, def);
-        
-        CreateDropdown(OSCLeashSetting.LeashDirection, "Leash Direction", "Direction the leash faces", LeashDirection.North);
+        ResetLeashState();
+        TryNeutralizePlayerInput(forceAll: true);
+
+        PoseUpdateResult cleanupResult = _openVr.RemoveOwnOffset();
+        HandleVrResult(cleanupResult, "clean up after avatar change", Stopwatch.GetTimestamp());
+        if (cleanupResult is PoseUpdateResult.Success or PoseUpdateResult.NoChange)
+            _openVr.Clear();
+        else
+            _openVr.Disconnect();
     }
 
-    private void RegisterAllParameters()
+    protected override void OnPlayerUpdate()
+    {
+        if (GetClient().Player is not null)
+            return;
+
+        ResetLeashState();
+        _playerInput.RequestFullNeutral();
+    }
+
+    private void CreateSettings()
+    {
+        foreach (var (key, name, description, defaultValue, min, max) in SliderSettings)
+            CreateSlider(key, name, description, defaultValue, min, max);
+
+        foreach (var (key, name, description, defaultValue) in ToggleSettings)
+            CreateToggle(key, name, description, defaultValue);
+
+        CreateDropdown(
+            OSCLeashSetting.LeashDirection,
+            "Leash Forward",
+            "Prefab forward axis used for turning; most prefabs use North (+Z)",
+            LeashDirection.North);
+    }
+
+    private void RegisterParameters()
     {
         RegisterParameter<bool>(OSCLeashParameter.IsGrabbed, "Leash_IsGrabbed", ParameterMode.Read, "Leash Grabbed", "Whether the leash is being held");
-        RegisterParameter<bool>(OSCLeashParameter.LeashEnable, "leash_enable", ParameterMode.Read, "Leash Enable", "Enables/disables all leash pulling motion");
-        
-        foreach (var (key, address, name, desc) in FloatParameters)
-            RegisterParameter<float>(key, address, ParameterMode.Read, name, desc);
+        RegisterParameter<bool>(OSCLeashParameter.LeashEnable, "leash_enable", ParameterMode.Read, "Leash Enable", "Enables or disables leash motion");
+
+        foreach (var (key, address, name, description) in FloatParameters)
+            RegisterParameter<float>(key, address, ParameterMode.Read, name, description);
     }
 
     private void CreateSettingsGroups()
     {
-        CreateGroup("Basic Movement", "Core movement and speed settings",
-            OSCLeashSetting.WalkDeadzone, OSCLeashSetting.RunDeadzone, OSCLeashSetting.StrengthMultiplier,
-            OSCLeashSetting.UpDownDeadzone, OSCLeashSetting.UpDownCompensation, OSCLeashSetting.MovementSmoothing,
-            OSCLeashSetting.LeashDirection);
-        CreateGroup("Turning Controls", "Avatar rotation and turning behavior",
-            OSCLeashSetting.TurningEnabled, OSCLeashSetting.TurningMultiplier,
-            OSCLeashSetting.TurningDeadzone, OSCLeashSetting.TurningGoal);
-        CreateGroup("Vertical Movement", "OpenVR height control and gravity settings",
-            OSCLeashSetting.VerticalMovementEnabled, OSCLeashSetting.GrabBasedGravity,
-            OSCLeashSetting.VerticalMovementMultiplier, OSCLeashSetting.VerticalMovementDeadzone,
-            OSCLeashSetting.VerticalMovementSmoothing, OSCLeashSetting.VerticalHorizontalCompensation,
-            OSCLeashSetting.GravityStrength, OSCLeashSetting.TerminalVelocity);
+        CreateGroup(
+            "Movement",
+            "When movement starts and how strongly it responds",
+            OSCLeashSetting.WalkDeadzone,
+            OSCLeashSetting.RunDeadzone,
+            OSCLeashSetting.StrengthMultiplier);
+
+        CreateGroup(
+            "Turning",
+            "Optional turning from side pulls",
+            OSCLeashSetting.TurningEnabled,
+            OSCLeashSetting.LeashDirection,
+            OSCLeashSetting.TurningMultiplier);
+
+        CreateGroup(
+            "Height Drag",
+            "Optional OpenVR playspace height control",
+            OSCLeashSetting.VerticalMovementEnabled,
+            OSCLeashSetting.VerticalMovementMultiplier,
+            OSCLeashSetting.MaximumVerticalOffset,
+            OSCLeashSetting.GrabBasedGravity);
     }
 
-    private void InitializeParameterHandlers()
-    {
-        _parameterHandlers = new Dictionary<OSCLeashParameter, Action<RegisteredParameter>>
-        {
-            [OSCLeashParameter.IsGrabbed] = p => _isGrabbed = p.GetValue<bool>(),
-            [OSCLeashParameter.LeashEnable] = p => _leashEnabled = p.GetValue<bool>(),
-            [OSCLeashParameter.Stretch] = p => _stretch = p.GetValue<float>(),
-            [OSCLeashParameter.ZPositive] = p => _zPos = p.GetValue<float>(),
-            [OSCLeashParameter.ZNegative] = p => _zNeg = p.GetValue<float>(),
-            [OSCLeashParameter.XPositive] = p => _xPos = p.GetValue<float>(),
-            [OSCLeashParameter.XNegative] = p => _xNeg = p.GetValue<float>(),
-            [OSCLeashParameter.YPositive] = p => _yPos = p.GetValue<float>(),
-            [OSCLeashParameter.YNegative] = p => _yNeg = p.GetValue<float>(),
-        };
-    }
-
-    private void CleanupVRResources()
-    {
-        if (!_vrInitialized) return;
-        
-        try
-        {
-            var setup = OpenVR.ChaperoneSetup;
-            if (setup != null)
-            {
-                setup.SetWorkingStandingZeroPoseToRawTrackingPose(ref _initialStandingZeroPose);
-                setup.CommitWorkingCopy(EChaperoneConfigFile.Live);
-            }
-        }
-        catch { }
-        
-        _vrInitialized = false;
-    }
-
-    private void ResetParametersToSafeValues()
-    {
-        var player = GetPlayer();
-        if (player == null) return;
-        
-        try { player.StopRun(); } catch { }
-        try { player.MoveVertical(0); } catch { }
-        try { player.MoveHorizontal(0); } catch { }
-        try { player.LookHorizontal(0); } catch { }
-    }
-
-    private void ClearModuleState()
-    {
-        _isGrabbed = false;
-        _leashEnabled = true;
-        _stretch = 0f;
-        _xPos = _xNeg = _yPos = _yNeg = _zPos = _zNeg = 0f;
-        _isWalking = _isRunning = false;
-        _vrVelocity = 0f;
-        _referenceHeight = 0f;
-        _currentVerticalOffset = 0f;
-        _vrInitialized = false;
-        _vrInitFailed = false;
-        _grabbedAt = null;
-        _smoothMoveX = _smoothMoveZ = 0f;
-        _wasGrabbed = false;
-    }
-
-    private void InitializeVR()
-    {
-        if (_vrInitFailed) return;
-        
-        var ovrClient = GetOpenVRManager();
-        if (ovrClient is null)
-        {
-            Log("Warning: OpenVR manager not available, vertical movement disabled");
-            _vrInitFailed = true;
-            return;
-        }
-
-        try
-        {
-            var setup = OpenVR.ChaperoneSetup;
-            if (setup != null)
-            {
-                _standingZeroPose = new HmdMatrix34_t();
-                setup.GetWorkingStandingZeroPoseToRawTrackingPose(ref _standingZeroPose);
-                _initialStandingZeroPose = _standingZeroPose;
-                _referenceHeight = _standingZeroPose.m7;
-                _currentVerticalOffset = 0;
-                _vrVelocity = 0;
-                _vrInitialized = true;
-                Log($"VR initialized at reference height: {_referenceHeight:F3}");
-            }
-            else
-            {
-                Log("Warning: OpenVR ChaperoneSetup not available");
-                _vrInitFailed = true;
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"Warning: OpenVR not available ({ex.Message})");
-            _vrInitFailed = true;
-        }
-    }
-
-    private void UpdateReferenceHeight()
-    {
-        if (!_vrInitialized) return;
-        
-        var ovrClient = GetOpenVRManager();
-        if (ovrClient is null) return;
-
-        try
-        {
-            var chaperoneSetup = OpenVR.ChaperoneSetup;
-            if (chaperoneSetup != null)
-            {
-                chaperoneSetup.GetWorkingStandingZeroPoseToRawTrackingPose(ref _standingZeroPose);
-                _referenceHeight = _standingZeroPose.m7;
-                _currentVerticalOffset = 0;
-                _vrVelocity = 0;
-            }
-        }
-        catch { }
-    }
-
-    private void ApplyOffset(float newOffset)
-    {
-        if (!CanUpdatePlayspace()) return;
-
-        try
-        {
-            var chaperoneSetup = OpenVR.ChaperoneSetup;
-            if (chaperoneSetup == null) return;
-
-            _currentVerticalOffset = newOffset;
-            _standingZeroPose.m7 = _referenceHeight + newOffset;
-
-            chaperoneSetup.SetWorkingStandingZeroPoseToRawTrackingPose(ref _standingZeroPose);
-            chaperoneSetup.CommitWorkingCopy(EChaperoneConfigFile.Live);
-        }
-        catch
-        {
-            _vrInitialized = false;
-        }
-    }
-
-    private bool CanUpdatePlayspace()
-    {
-        var ovrClient = GetOpenVRManager();
-        if (!_settings.VerticalEnabled || !_vrInitialized || ovrClient is null)
-            return false;
-
-        return _isGrabbed || (_settings.GravityEnabled && 
-               (MathF.Abs(_currentVerticalOffset) > LeashConfig.STOP_THRESHOLD || 
-                MathF.Abs(_vrVelocity) > LeashConfig.VELOCITY_STOP_THRESHOLD));
-    }
-
-    [ModuleUpdate(ModuleUpdateMode.Custom, true, 8)]
+    [ModuleUpdate(ModuleUpdateMode.Custom, true, LeashDefaults.UpdateIntervalMilliseconds)]
     private void UpdateMovement()
     {
-        var player = GetPlayer();
-        if (player == null) return;
+        if (_isStopping)
+            return;
 
+        long now = Stopwatch.GetTimestamp();
+        float deltaTime = GetDeltaTime(now);
         RefreshSettings();
+        ObserveInputFreshness(now);
 
-        // If this parameter is never received, it remains true by default.
-        bool grabbedForMotion = _isGrabbed && _leashEnabled;
-        
-        bool justGrabbed = grabbedForMotion && !_wasGrabbed;
-        bool justReleased = !grabbedForMotion && _wasGrabbed;
-        _wasGrabbed = grabbedForMotion;
+        bool grabbedForMotion = _input.GrabbedForMotion;
+        bool justGrabbed = grabbedForMotion && !_wasGrabbedForMotion;
+        bool justReleased = !grabbedForMotion && _wasGrabbedForMotion;
+        _wasGrabbedForMotion = grabbedForMotion;
 
-        UpdateMovementState();
-        var movement = CalculateMovement();
-        ApplyMovement(player, movement);
-        if (_leashEnabled)
-            HandleVRState();
-        
-        if (_leashEnabled && _settings.VerticalEnabled && _vrInitialized)
-            UpdateVR(justGrabbed, justReleased);
+        LeashIntent intent = _motion.Resolve(_input.Signal, _settings, grabbedForMotion);
+
+        MaintainOpenVrConnection(now);
+        UpdateVerticalMotion(intent, grabbedForMotion, justGrabbed, justReleased, deltaTime, now);
+
+        UpdatePlayerMovement(intent, grabbedForMotion, now);
+
+        LogHealthIfDue(now);
+    }
+
+    private float GetDeltaTime(long now)
+    {
+        if (_lastUpdateTimestamp == 0)
+        {
+            _lastUpdateTimestamp = now;
+            return LeashDefaults.UpdateIntervalSeconds;
+        }
+
+        float elapsed = (float)((now - _lastUpdateTimestamp) / (double)Stopwatch.Frequency);
+        _lastUpdateTimestamp = now;
+        return Math.Clamp(elapsed, 0f, LeashDefaults.MaxDeltaTimeSeconds);
     }
 
     private void RefreshSettings()
     {
-        _settings = new CachedSettings
-        {
-            WalkDeadzone = GetSettingValue<float>(OSCLeashSetting.WalkDeadzone),
-            RunDeadzone = GetSettingValue<float>(OSCLeashSetting.RunDeadzone),
-            StrengthMultiplier = GetSettingValue<float>(OSCLeashSetting.StrengthMultiplier),
-            UpDownDeadzone = GetSettingValue<float>(OSCLeashSetting.UpDownDeadzone),
-            UpDownCompensation = GetSettingValue<float>(OSCLeashSetting.UpDownCompensation),
-            MovementSmoothing = GetSettingValue<float>(OSCLeashSetting.MovementSmoothing),
-            Direction = GetSettingValue<LeashDirection>(OSCLeashSetting.LeashDirection),
-            TurningEnabled = GetSettingValue<bool>(OSCLeashSetting.TurningEnabled),
-            TurningMultiplier = GetSettingValue<float>(OSCLeashSetting.TurningMultiplier),
-            TurningDeadzone = GetSettingValue<float>(OSCLeashSetting.TurningDeadzone),
-            TurningGoal = GetSettingValue<float>(OSCLeashSetting.TurningGoal),
-            VerticalEnabled = GetSettingValue<bool>(OSCLeashSetting.VerticalMovementEnabled),
-            GravityEnabled = GetSettingValue<bool>(OSCLeashSetting.GrabBasedGravity),
-            VerticalMultiplier = GetSettingValue<float>(OSCLeashSetting.VerticalMovementMultiplier),
-            VerticalDeadzone = GetSettingValue<float>(OSCLeashSetting.VerticalMovementDeadzone),
-            VerticalSmoothing = GetSettingValue<float>(OSCLeashSetting.VerticalMovementSmoothing),
-            VerticalAngle = GetSettingValue<float>(OSCLeashSetting.VerticalHorizontalCompensation),
-            GravityStrength = GetSettingValue<float>(OSCLeashSetting.GravityStrength),
-            TerminalVelocity = GetSettingValue<float>(OSCLeashSetting.TerminalVelocity),
-        };
+        _settings = new LeashSettings(
+            WalkDeadzone: GetSettingValue<float>(OSCLeashSetting.WalkDeadzone),
+            RunDeadzone: GetSettingValue<float>(OSCLeashSetting.RunDeadzone),
+            StrengthMultiplier: GetSettingValue<float>(OSCLeashSetting.StrengthMultiplier),
+            Direction: GetSettingValue<LeashDirection>(OSCLeashSetting.LeashDirection),
+            TurningEnabled: GetSettingValue<bool>(OSCLeashSetting.TurningEnabled),
+            TurningMultiplier: GetSettingValue<float>(OSCLeashSetting.TurningMultiplier),
+            VerticalEnabled: GetSettingValue<bool>(OSCLeashSetting.VerticalMovementEnabled),
+            ReturnHeightOnRelease: GetSettingValue<bool>(OSCLeashSetting.GrabBasedGravity),
+            VerticalMultiplier: GetSettingValue<float>(OSCLeashSetting.VerticalMovementMultiplier),
+            MaximumVerticalOffset: GetSettingValue<float>(OSCLeashSetting.MaximumVerticalOffset))
+            .Sanitize();
     }
 
-    private void HandleVRState()
+    private void MaintainOpenVrConnection(long now)
     {
-        if (_settings.VerticalEnabled && !_vrInitialized && !_vrInitFailed)
-            InitializeVR();
-        else if (!_settings.VerticalEnabled && _vrInitialized)
-            CleanupVRResources();
-        else if (!_settings.VerticalEnabled && _vrInitFailed)
-            _vrInitFailed = false;
-    }
-
-    private void UpdateMovementState()
-    {
-        if (_isGrabbed && _leashEnabled)
+        if (!_settings.VerticalEnabled)
         {
-            _isWalking = _stretch > _settings.WalkDeadzone;
-            _isRunning = _stretch > _settings.RunDeadzone;
-        }
-        else
-        {
-            _isWalking = false;
-            _isRunning = false;
-        }
-    }
+            if (_openVr.OwnsPose)
+            {
+                PoseUpdateResult cleanupResult = _openVr.RemoveOwnOffset();
+                HandleVrResult(cleanupResult, "disable height drag", now);
+            }
 
-    private (float x, float y, float z) CalculateMovement()
-    {
-        if (!_isGrabbed || !_leashEnabled)
-        {
-            _smoothMoveX = 0f;
-            _smoothMoveZ = 0f;
-            return (0f, 0f, 0f);
-        }
-
-        float netX = NetX;
-        float netY = NetY;
-        float netZ = NetZ;
-
-        float strength = _stretch * _settings.StrengthMultiplier;
-        float verticalStretch = MathF.Abs(netY);
-        
-        if (verticalStretch >= _settings.UpDownDeadzone && _settings.UpDownCompensation > 0)
-        {
-            float compensationFactor = Math.Clamp(1.0f - (verticalStretch * _settings.UpDownCompensation * 0.5f), 0.1f, 1.0f);
-            netX *= compensationFactor;
-            netZ *= compensationFactor;
-        }
-
-        netX *= strength;
-        netZ *= strength;
-        
-        float smoothing = _settings.MovementSmoothing;
-        _smoothMoveX = _smoothMoveX * smoothing + netX * (1f - smoothing);
-        _smoothMoveZ = _smoothMoveZ * smoothing + netZ * (1f - smoothing);
-
-        return (_smoothMoveX, netY, _smoothMoveZ);
-    }
-
-    private void ApplyMovement(Player player, (float x, float y, float z) movement)
-    {
-        if (!_isGrabbed || !_leashEnabled)
-        {
-            player.StopRun();
-            player.MoveVertical(0);
-            player.MoveHorizontal(0);
-            player.LookHorizontal(0);
+            _poseRecovery.Reset();
+            _verticalMotion.Reset();
+            _nextVrRetryTimestamp = 0;
+            _openVr.Disconnect();
             return;
         }
 
-        if (_isRunning) player.Run();
-        else player.StopRun();
-
-        player.MoveVertical(movement.z);
-        player.MoveHorizontal(movement.x);
-        ApplyTurning(player, movement);
-    }
-
-    private void ApplyTurning(Player player, (float x, float y, float z) movement)
-    {
-        if (!_settings.TurningEnabled || _stretch <= _settings.TurningDeadzone)
+        if (_openVr.Connected || now < _nextVrRetryTimestamp)
             return;
 
-        float turnValue = CalculateTurning(movement.x, movement.z);
-        if (MathF.Abs(turnValue) > LeashConfig.TURN_EPSILON)
-            player.LookHorizontal(turnValue);
+        PoseUpdateResult result = GetOpenVRManager() is null
+            ? PoseUpdateResult.OpenVrUnavailable
+            : _openVr.TryConnect();
+
+        if (result == PoseUpdateResult.Success)
+        {
+            _verticalMotion.Rebase(_openVr.LastAppliedOffset);
+            LogDebug($"OpenVR height drag ready at reference height {_openVr.ReferenceHeight:F3}");
+            _nextVrRetryTimestamp = 0;
+            return;
+        }
+
+        if (result == PoseUpdateResult.ExternalWriterActive)
+        {
+            SuspendForExternalWriter(now);
+            return;
+        }
+
+        _nextVrRetryTimestamp = AddSeconds(now, LeashDefaults.VrRetryIntervalSeconds);
+        HandleVrResult(result, "connect", now);
     }
 
-    private float CalculateTurning(float moveX, float moveZ)
+    private void UpdateVerticalMotion(
+        LeashIntent intent,
+        bool grabbedForMotion,
+        bool justGrabbed,
+        bool justReleased,
+        float deltaTime,
+        long now)
     {
-        float absX = MathF.Abs(moveX);
-        float absZ = MathF.Abs(moveZ);
-        float maxMag = MathF.Max(absX, absZ);
-        
-        if (maxMag < LeashConfig.NORMALIZE_EPSILON) return 0f;
+        if (!_settings.VerticalEnabled || !_openVr.Connected)
+            return;
 
-        float normX = moveX / maxMag;
-        float normZ = moveZ / maxMag;
-
-        float forwardComponent = _settings.Direction switch
-        {
-            LeashDirection.North or LeashDirection.South => normZ,
-            LeashDirection.East or LeashDirection.West => normX,
-            _ => 0f
-        };
-
-        float sideComponent = _settings.Direction switch
-        {
-            LeashDirection.North or LeashDirection.South => normX,
-            LeashDirection.East or LeashDirection.West => normZ,
-            _ => 0f
-        };
-
-        float sideMag = MathF.Abs(sideComponent);
-        float fwdMag = MathF.Abs(forwardComponent);
-
-        if (sideMag < LeashConfig.NORMALIZE_EPSILON && fwdMag < LeashConfig.NORMALIZE_EPSILON)
-            return 0f;
-
-        float pullAngleDeg = MathF.Atan2(sideMag, fwdMag) * (180f / MathF.PI);
-        if (pullAngleDeg < _settings.TurningGoal) return 0f;
-
-        float baseTurn = sideComponent * _settings.TurningMultiplier;
-        float orientedTurn = _settings.Direction switch
-        {
-            LeashDirection.North => baseTurn,
-            LeashDirection.South => -baseTurn,
-            LeashDirection.East => -baseTurn,
-            LeashDirection.West => baseTurn,
-            _ => 0f
-        };
-
-        return Math.Clamp(orientedTurn, -1f, 1f);
-    }
-
-    private void UpdateVR(bool justGrabbed, bool justReleased)
-    {
-        if (!_vrInitialized) return;
-
-        bool shouldUpdateChaperone = false;
-        
         if (justGrabbed)
         {
-            UpdateReferenceHeight();
-            _grabbedAt = DateTime.UtcNow;
-        }
-        else if (justReleased)
-        {
-            _vrVelocity = 0f;
-            _grabbedAt = null;
-        }
+            PoseUpdateResult refreshResult = _openVr.RefreshBaseline();
+            HandleVrResult(refreshResult, "capture grab height", now);
+            if (refreshResult != PoseUpdateResult.Success)
+                return;
 
-        if (_isGrabbed)
-            shouldUpdateChaperone = HandleGrabbedVerticalMovement();
-        else if (_settings.GravityEnabled)
-            shouldUpdateChaperone = ApplyGravity();
-
-        if (shouldUpdateChaperone)
-            ApplyOffset(_currentVerticalOffset);
-    }
-
-    private bool HandleGrabbedVerticalMovement()
-    {
-        if (_grabbedAt.HasValue)
-        {
-            var elapsed = (DateTime.UtcNow - _grabbedAt.Value).TotalSeconds;
-            if (elapsed < LeashConfig.VERTICAL_COOLDOWN)
-                return false;
+            _verticalMotion.Reset();
+            _poseRecovery.Reset();
+            LogDebug($"Leash grabbed at OpenVR height {_openVr.ReferenceHeight:F3}");
         }
 
-        float netY = NetY;
-        float horizontalMag = MathF.Sqrt(NetX * NetX + NetZ * NetZ);
-        float pullAngle = MathF.Atan2(MathF.Abs(netY), horizontalMag) * (180f / MathF.PI);
-
-        if (pullAngle >= _settings.VerticalAngle && MathF.Abs(netY) >= _settings.VerticalDeadzone)
+        if (justReleased)
         {
-            float targetVelocity = netY * _settings.VerticalMultiplier;
-            _vrVelocity = _vrVelocity * _settings.VerticalSmoothing + targetVelocity * (1f - _settings.VerticalSmoothing);
-            _currentVerticalOffset += _vrVelocity * LeashConfig.DELTA_TIME;
-            return true;
+            _verticalMotion.Rebase(_openVr.LastAppliedOffset);
+            LogDebug($"Leash released at height offset {_verticalMotion.Offset:F3}");
         }
-        
-        return false;
-    }
 
-    private bool ApplyGravity()
-    {
-        if (MathF.Abs(_currentVerticalOffset) < LeashConfig.STOP_THRESHOLD && 
-            MathF.Abs(_vrVelocity) < LeashConfig.VELOCITY_STOP_THRESHOLD)
+        if (_poseRecovery.Suspended && !TryResumeAfterExternalPoseSettles(grabbedForMotion, now))
+            return;
+
+        bool changed = _verticalMotion.Constrain(_settings.MaximumVerticalOffset);
+        if (grabbedForMotion)
         {
-            if (_currentVerticalOffset != 0f || _vrVelocity != 0f)
+            if (!intent.VerticalModeActive)
             {
-                _vrVelocity = 0f;
-                _currentVerticalOffset = 0f;
-                return true;
+                _verticalMotion.Rebase(_openVr.LastAppliedOffset);
+                changed = _verticalMotion.Constrain(_settings.MaximumVerticalOffset);
+                if (!changed)
+                    return;
             }
+            else
+            {
+                changed |= _verticalMotion.ApplyPull(
+                    intent.VerticalTargetVelocity,
+                    deltaTime,
+                    _settings.MaximumVerticalOffset);
+            }
+        }
+        else if (_settings.ReturnHeightOnRelease)
+        {
+            changed |= _verticalMotion.ReturnToOrigin(
+                LeashDefaults.ReturnAcceleration,
+                _settings.VerticalMultiplier,
+                deltaTime);
+        }
+        else if (!changed)
+        {
+            return;
+        }
+
+        if (!changed)
+            return;
+
+        bool finalReturn = _verticalMotion.Offset == 0f &&
+                           MathF.Abs(_openVr.LastAppliedOffset) > LeashDefaults.NormalizeEpsilon;
+
+        PoseUpdateResult result = _openVr.ApplyOffset(_verticalMotion.Offset);
+        if (result == PoseUpdateResult.Success)
+        {
+            if (finalReturn)
+                _openVr.ReleaseZeroOffsetOwnership();
+            return;
+        }
+
+        if (result == PoseUpdateResult.ExternalWriterActive)
+        {
+            SuspendForExternalWriter(now);
+            return;
+        }
+
+        _verticalMotion.Rebase(_openVr.LastAppliedOffset);
+        _nextVrRetryTimestamp = AddSeconds(now, LeashDefaults.VrRetryIntervalSeconds);
+        HandleVrResult(result, "write height preview", now);
+    }
+
+    private void SuspendForExternalWriter(long now)
+    {
+        _verticalMotion.Reset();
+        bool willRetryAutomatically = _poseRecovery.Suspend(_wasGrabbedForMotion, TimestampSeconds(now));
+        if (!willRetryAutomatically)
+        {
+            Log("Warning: another application repeatedly changed the OpenVR standing pose. " +
+                "OSC Leash height drag is suspended until the leash is released and grabbed again.");
+            return;
+        }
+
+        Log("OpenVR standing pose changed externally. OSC Leash is waiting for it to settle before resuming height drag.");
+    }
+
+    private bool TryResumeAfterExternalPoseSettles(bool grabbedForMotion, long now)
+    {
+        if (!grabbedForMotion || _poseRecovery.LockedUntilRegrab)
+            return false;
+
+        PoseUpdateResult result = _openVr.ObserveExternalPose(out bool changed);
+        if (result is not PoseUpdateResult.Success and not PoseUpdateResult.ExternalWriterActive)
+        {
+            HandleVrResult(result, "observe external pose", now);
             return false;
         }
 
-        float gravityDirection = -MathF.Sign(_currentVerticalOffset);
-        _vrVelocity += _settings.GravityStrength * gravityDirection * LeashConfig.DELTA_TIME;
-        
-        _vrVelocity = gravityDirection > 0
-            ? MathF.Min(_vrVelocity, _settings.TerminalVelocity)
-            : MathF.Max(_vrVelocity, -_settings.TerminalVelocity);
+        bool resumed = _poseRecovery.Observe(
+            grabbedForMotion,
+            changed,
+            TimestampSeconds(now),
+            LeashDefaults.ExternalPoseQuietSeconds);
+        if (!resumed)
+            return false;
 
-        float newOffset = _currentVerticalOffset + _vrVelocity * LeashConfig.DELTA_TIME;
-
-        if ((_currentVerticalOffset > 0f && newOffset < 0f) ||
-            (_currentVerticalOffset < 0f && newOffset > 0f))
-        {
-            _vrVelocity = 0f;
-            _currentVerticalOffset = 0f;
-            return true;
-        }
-
-        _currentVerticalOffset = newOffset;
+        _verticalMotion.Reset();
+        Log("OpenVR standing pose is stable; OSC Leash height drag resumed from the new baseline.");
         return true;
     }
 
+    private void ObserveInputFreshness(long now)
+    {
+        bool expired = _input.ExpireIfStale(
+            now,
+            (long)(LeashDefaults.InputFreshnessSeconds * Stopwatch.Frequency));
+        if (expired)
+        {
+            _motion.Reset();
+            _playerInput.RequestFullNeutral();
+            if (!_inputWasStale)
+            {
+                Log($"OSC Leash input stopped for more than {LeashDefaults.InputFreshnessSeconds:F0}s. " +
+                    "Movement was neutralized; release and re-grab the leash before continuing.");
+            }
+
+            _inputWasStale = true;
+            return;
+        }
+
+        if (!_inputWasStale || !_input.HasReceivedInput || _input.RequiresGrabRelease)
+            return;
+
+        _inputWasStale = false;
+        Log("OSC Leash input recovered.");
+    }
+
+    private void UpdatePlayerMovement(LeashIntent intent, bool grabbedForMotion, long now)
+    {
+        if (now < _nextPlayerRetryTimestamp)
+            return;
+
+        Player? player;
+        try
+        {
+            player = GetClient().Player;
+        }
+        catch (Exception ex)
+        {
+            HandlePlayerInputResult(success: false, ex, now, scheduleRetry: true);
+            return;
+        }
+
+        if (player is null)
+            return;
+
+        bool success = _playerInput.Apply(new VrcPlayerInputSink(player), intent, grabbedForMotion);
+        HandlePlayerInputResult(success, _playerInput.LastFailure, now, scheduleRetry: true);
+    }
+
+    private void TryNeutralizePlayerInput(bool forceAll = false)
+    {
+        if (forceAll)
+            _playerInput.RequestFullNeutral();
+
+        Player? player;
+        try
+        {
+            player = GetClient().Player;
+        }
+        catch (Exception ex)
+        {
+            HandlePlayerInputResult(success: false, ex, Stopwatch.GetTimestamp(), scheduleRetry: false);
+            return;
+        }
+
+        if (player is null)
+            return;
+
+        bool success = _playerInput.TryNeutralize(new VrcPlayerInputSink(player));
+        HandlePlayerInputResult(
+            success,
+            _playerInput.LastFailure,
+            Stopwatch.GetTimestamp(),
+            scheduleRetry: false);
+    }
+
+    private void HandlePlayerInputResult(
+        bool success,
+        Exception? failure,
+        long now,
+        bool scheduleRetry)
+    {
+        if (success)
+        {
+            _lastPlayerSuccessTimestamp = now;
+            _nextPlayerRetryTimestamp = 0;
+            if (_consecutivePlayerFailures > 0)
+                Log($"OSC Leash player input recovered after {_consecutivePlayerFailures} failed batches.");
+            _consecutivePlayerFailures = 0;
+            return;
+        }
+
+        _consecutivePlayerFailures++;
+        if (scheduleRetry)
+        {
+            int exponent = Math.Min(_consecutivePlayerFailures - 1, 5);
+            float delaySeconds = Math.Min(
+                LeashDefaults.PlayerRetryInitialSeconds * (1 << exponent),
+                LeashDefaults.PlayerRetryMaximumSeconds);
+            _nextPlayerRetryTimestamp = AddSeconds(now, delaySeconds);
+        }
+
+        if (SecondsSince(_lastPlayerWarningTimestamp, now) < 5f)
+            return;
+
+        string detail = failure is null ? string.Empty : $" {failure.GetType().Name}: {failure.Message}";
+        Log($"Warning: VRChat rejected an OSC Leash player-input batch " +
+            $"({_consecutivePlayerFailures} consecutive). Remaining commands were skipped and neutral cleanup remains pending.{detail}");
+        _lastPlayerWarningTimestamp = now;
+    }
+
+    private void LogHealthIfDue(long now)
+    {
+        if (SecondsSince(_lastHealthLogTimestamp, now) < LeashDefaults.HealthLogIntervalSeconds)
+            return;
+
+        string inputAge = _input.HasReceivedInput
+            ? $"{_input.InputAgeSeconds(now):F1}s"
+            : "none";
+        string playerAge = _lastPlayerSuccessTimestamp == 0
+            ? "none"
+            : $"{SecondsSince(_lastPlayerSuccessTimestamp, now):F1}s";
+        LogDebug(
+            $"OSC Leash health: inputAge={inputAge}, stale={_inputWasStale}, " +
+            $"releaseRequired={_input.RequiresGrabRelease}, playerSuccessAge={playerAge}, " +
+            $"playerFailures={_consecutivePlayerFailures}, neutralPending={_playerInput.HasPendingNeutral}, " +
+            $"openVrConnected={_openVr.Connected}");
+        _lastHealthLogTimestamp = now;
+    }
+
+    private void HandleVrResult(PoseUpdateResult result, string operation, long now)
+    {
+        if (result is PoseUpdateResult.Success or PoseUpdateResult.NoChange or PoseUpdateResult.ExternalWriterActive)
+            return;
+
+        bool changed = result != _lastLoggedVrResult;
+        if (!changed && SecondsSince(_lastVrWarningTimestamp, now) < 5f)
+            return;
+
+        Log($"Warning: OpenVR could not {operation}: {result}");
+        _lastLoggedVrResult = result;
+        _lastVrWarningTimestamp = now;
+    }
+
+    private void ResetLeashState()
+    {
+        _input.Reset();
+        _motion.Reset();
+        _wasGrabbedForMotion = false;
+        _poseRecovery.Reset();
+        _lastUpdateTimestamp = 0;
+        _nextVrRetryTimestamp = 0;
+        _nextPlayerRetryTimestamp = 0;
+        _verticalMotion.Reset();
+        _inputWasStale = false;
+    }
+
+    private void ClearState(bool clearOpenVrOwnership)
+    {
+        ResetLeashState();
+        _lastVrWarningTimestamp = 0;
+        _lastPlayerWarningTimestamp = 0;
+        _lastPlayerSuccessTimestamp = 0;
+        _lastHealthLogTimestamp = 0;
+        _consecutivePlayerFailures = 0;
+        _lastLoggedVrResult = PoseUpdateResult.NoChange;
+        if (clearOpenVrOwnership)
+            _openVr.Clear();
+        else
+            _openVr.Disconnect();
+    }
+
+    private static long AddSeconds(long timestamp, float seconds)
+        => timestamp + (long)(seconds * Stopwatch.Frequency);
+
+    private static float SecondsSince(long earlier, long now)
+        => earlier == 0 ? float.MaxValue : (float)((now - earlier) / (double)Stopwatch.Frequency);
+
+    private static double TimestampSeconds(long timestamp)
+        => timestamp / (double)Stopwatch.Frequency;
+
     protected override void OnRegisteredParameterReceived(RegisteredParameter parameter)
     {
-        var paramType = (OSCLeashParameter)parameter.Lookup;
-        if (_parameterHandlers?.TryGetValue(paramType, out var handler) == true)
-            handler(parameter);
+        if (_isStopping)
+            return;
+
+        OSCLeashParameter key = (OSCLeashParameter)parameter.Lookup;
+        switch (key)
+        {
+            case OSCLeashParameter.IsGrabbed:
+            case OSCLeashParameter.LeashEnable:
+                _input.Set(key, parameter.GetValue<bool>());
+                break;
+            default:
+                _input.Set(key, parameter.GetValue<float>());
+                break;
+        }
     }
 }
-

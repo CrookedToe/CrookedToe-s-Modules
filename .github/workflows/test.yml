@@ -1,0 +1,22 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      CI: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - run: dotnet restore CrookedToesModules.sln
+      - run: dotnet test CrookedToesModules.sln --configuration Debug --no-restore
+      - run: dotnet test CrookedToesModules.sln --configuration Release --no-restore
