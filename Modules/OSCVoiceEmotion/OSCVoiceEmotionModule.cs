@@ -2,6 +2,9 @@ using VRCOSC.App.SDK.Modules;
 using VRCOSC.App.SDK.Parameters;
 using System.IO;
 using VRCOSC.App.Settings;
+using System.Diagnostics;
+using CrookedToe.Modules.Compatibility;
+using CrookedToe.Modules.Diagnostics;
 
 namespace CrookedToe.Modules.OSCVoiceEmotion;
 
@@ -10,6 +13,8 @@ namespace CrookedToe.Modules.OSCVoiceEmotion;
 [ModuleType(ModuleType.Generic)]
 public sealed class OSCVoiceEmotionModule : Module
 {
+    private const double SlowPublicationCommandMilliseconds = 50d;
+    private static readonly long PublicationWarningCooldown = Stopwatch.Frequency * 5;
     private enum P { Happy, Sad, Angry, Fear, Surprise, Neutral, Laughter, Crying, Energy, Confidence, Speaking, Laughing, CryingActive }
     private enum S { InferenceInterval, MinimumSpeech, ModelThreads }
     private VoiceEmotionRuntime? _runtime;
@@ -17,6 +22,14 @@ public sealed class OSCVoiceEmotionModule : Module
     private bool _stopping;
     private bool _microphoneSubscribed;
     private readonly HysteresisBoolean _laughing = new(), _crying = new();
+    private ModuleDiagnostics? _diagnostics;
+    private DiagnosticProbe? _captureProbe;
+    private DiagnosticProbe? _inferenceProbe;
+    private DiagnosticProbe? _outputProbe;
+    private DiagnosticProbe? _publicationProbe;
+    private long _nextPublicationTimestamp;
+    private long _lastPublicationWarningTimestamp;
+    private int _consecutivePublicationFailures;
 
     protected override void OnPreLoad()
     {
@@ -42,6 +55,7 @@ public sealed class OSCVoiceEmotionModule : Module
 
     protected override async Task<bool> OnModuleStart()
     {
+        StartDiagnostics();
         try
         {
             _stopping = false;
@@ -57,6 +71,7 @@ public sealed class OSCVoiceEmotionModule : Module
         {
             Log($"OSC Voice Emotion could not start: {ex.Message}");
             await DisposeRuntimeAsync();
+            StopDiagnostics();
             return false;
         }
     }
@@ -75,7 +90,9 @@ public sealed class OSCVoiceEmotionModule : Module
         finally { _microphoneChangeGate.Release(); }
         _laughing.Reset();
         _crying.Reset();
+        _nextPublicationTimestamp = 0;
         Publish(EmotionState.NeutralState);
+        StopDiagnostics();
     }
 
     private void StartRuntime(string selectedMicrophoneId)
@@ -85,7 +102,13 @@ public sealed class OSCVoiceEmotionModule : Module
             ?? throw new FileNotFoundException($"Place an official SenseVoiceSmall INT8 ONNX export in {directory}");
         var options = new VoiceEmotionOptions { InferenceInterval = TimeSpan.FromMilliseconds(GetSettingValue<float>(S.InferenceInterval)),
             MinimumSpeechOccupancy = GetSettingValue<float>(S.MinimumSpeech) };
-        _runtime = new VoiceEmotionRuntime(new SenseVoiceOnnxBackend(model, (int)GetSettingValue<float>(S.ModelThreads)), options, selectedMicrophoneId);
+        _runtime = new VoiceEmotionRuntime(
+            new SenseVoiceOnnxBackend(model, (int)GetSettingValue<float>(S.ModelThreads)),
+            options,
+            selectedMicrophoneId,
+            _captureProbe,
+            _inferenceProbe,
+            _outputProbe);
         _runtime.StateChanged += Publish;
         _runtime.Warning += OnRuntimeWarning;
         _runtime.Start();
@@ -118,19 +141,70 @@ public sealed class OSCVoiceEmotionModule : Module
     private void OnRuntimeWarning(string message) => Log(message);
     private void Publish(EmotionState s)
     {
-        SendParameter(P.Happy, ThreeSignificantFigures(s.Happy));
-        SendParameter(P.Sad, ThreeSignificantFigures(s.Sad));
-        SendParameter(P.Angry, ThreeSignificantFigures(s.Angry));
-        SendParameter(P.Fear, ThreeSignificantFigures(s.Fear));
-        SendParameter(P.Surprise, ThreeSignificantFigures(s.Surprise));
-        SendParameter(P.Neutral, ThreeSignificantFigures(s.Neutral));
-        SendParameter(P.Laughter, ThreeSignificantFigures(s.Laughter));
-        SendParameter(P.Crying, ThreeSignificantFigures(s.Crying));
-        SendParameter(P.Energy, ThreeSignificantFigures(s.Energy));
-        SendParameter(P.Confidence, ThreeSignificantFigures(s.Confidence));
-        SendParameter(P.Speaking, s.Speaking);
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        SendParameter(P.Laughing, _laughing.Update(s.Laughter, now)); SendParameter(P.CryingActive, _crying.Update(s.Crying, now));
+        using DiagnosticScope measurement = _publicationProbe?.Measure() ?? default;
+        VrcOscUiDispatchWorkaround.ApplyIfDue();
+        long now = Stopwatch.GetTimestamp();
+        if (now < _nextPublicationTimestamp)
+            return;
+
+        DateTimeOffset utcNow = DateTimeOffset.UtcNow;
+        bool laughing = _laughing.Update(s.Laughter, utcNow);
+        bool crying = _crying.Update(s.Crying, utcNow);
+        try
+        {
+            if (!TrySend(P.Happy, ThreeSignificantFigures(s.Happy), out double slowMilliseconds) ||
+                !TrySend(P.Sad, ThreeSignificantFigures(s.Sad), out slowMilliseconds) ||
+                !TrySend(P.Angry, ThreeSignificantFigures(s.Angry), out slowMilliseconds) ||
+                !TrySend(P.Fear, ThreeSignificantFigures(s.Fear), out slowMilliseconds) ||
+                !TrySend(P.Surprise, ThreeSignificantFigures(s.Surprise), out slowMilliseconds) ||
+                !TrySend(P.Neutral, ThreeSignificantFigures(s.Neutral), out slowMilliseconds) ||
+                !TrySend(P.Laughter, ThreeSignificantFigures(s.Laughter), out slowMilliseconds) ||
+                !TrySend(P.Crying, ThreeSignificantFigures(s.Crying), out slowMilliseconds) ||
+                !TrySend(P.Energy, ThreeSignificantFigures(s.Energy), out slowMilliseconds) ||
+                !TrySend(P.Confidence, ThreeSignificantFigures(s.Confidence), out slowMilliseconds) ||
+                !TrySend(P.Speaking, s.Speaking, out slowMilliseconds) ||
+                !TrySend(P.Laughing, laughing, out slowMilliseconds) ||
+                !TrySend(P.CryingActive, crying, out slowMilliseconds))
+            {
+                RegisterPublicationFailure(Stopwatch.GetTimestamp(), null, slowMilliseconds);
+                return;
+            }
+
+            if (_consecutivePublicationFailures > 0)
+                Log("OSC Voice Emotion publication recovered");
+            _consecutivePublicationFailures = 0;
+            _nextPublicationTimestamp = 0;
+        }
+        catch (Exception ex)
+        {
+            RegisterPublicationFailure(Stopwatch.GetTimestamp(), ex, 0d);
+        }
+    }
+
+    private bool TrySend(P parameter, object value, out double slowMilliseconds)
+    {
+        long started = Stopwatch.GetTimestamp();
+        SendParameter(parameter, value);
+        slowMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        return slowMilliseconds < SlowPublicationCommandMilliseconds;
+    }
+
+    private void RegisterPublicationFailure(long now, Exception? exception, double slowMilliseconds)
+    {
+        _consecutivePublicationFailures++;
+        int exponent = Math.Min(_consecutivePublicationFailures - 1, 5);
+        double delaySeconds = Math.Min(2d, 0.1d * (1 << exponent));
+        _nextPublicationTimestamp = now + (long)(delaySeconds * Stopwatch.Frequency);
+        if (_consecutivePublicationFailures != 1 && now - _lastPublicationWarningTimestamp < PublicationWarningCooldown)
+            return;
+
+        _lastPublicationWarningTimestamp = now;
+        bool slow = slowMilliseconds >= SlowPublicationCommandMilliseconds;
+        string detail = slow ? $"an individual send took {slowMilliseconds:F0}ms" : exception?.Message ?? "unknown transport failure";
+        Log($"OSC Voice Emotion publication paused after {detail}; remaining sends in the batch were skipped.");
+        _diagnostics?.Event(
+            slow ? "parameter_publication_slow" : "parameter_publication_failure",
+            $"consecutive={_consecutivePublicationFailures};durationMs={slowMilliseconds:F1};exception={exception?.GetType().Name}:{exception?.Message}");
     }
 
     internal static float ThreeSignificantFigures(float value)
@@ -141,5 +215,31 @@ public sealed class OSCVoiceEmotionModule : Module
         int magnitude = (int)MathF.Floor(MathF.Log10(MathF.Abs(value)));
         float scale = MathF.Pow(10f, 2 - magnitude);
         return MathF.Round(value * scale, MidpointRounding.AwayFromZero) / scale;
+    }
+
+    private void StartDiagnostics()
+    {
+        StopDiagnostics();
+        _nextPublicationTimestamp = 0;
+        _lastPublicationWarningTimestamp = 0;
+        _consecutivePublicationFailures = 0;
+        _diagnostics = BoundedDiagnostics.StartModule("OSCVoiceEmotion");
+        _captureProbe = _diagnostics.CreateProbe("microphone_callback");
+        _inferenceProbe = _diagnostics.CreateProbe("onnx_inference");
+        _outputProbe = _diagnostics.CreateProbe("runtime_output", 100);
+        _publicationProbe = _diagnostics.CreateProbe("parameter_publication", 100);
+        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
+        if (patchedObservers > 0)
+            _diagnostics.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
+    }
+
+    private void StopDiagnostics()
+    {
+        _diagnostics?.Dispose();
+        _diagnostics = null;
+        _captureProbe = null;
+        _inferenceProbe = null;
+        _outputProbe = null;
+        _publicationProbe = null;
     }
 }

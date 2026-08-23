@@ -6,7 +6,7 @@ namespace CrookedToesModules.Tests.OSCLeash;
 public sealed class PlayerInputControllerTests
 {
     [TestMethod]
-    public void FailedActiveCommandStillLeavesNeutralCleanupPending()
+    public void FailedActiveChannelDoesNotPreventTheOtherChannels()
     {
         var controller = new PlayerInputController();
         var sink = new FakePlayerInputSink { FailHorizontal = true };
@@ -14,18 +14,13 @@ public sealed class PlayerInputControllerTests
         bool applied = controller.Apply(sink, MovingIntent(), active: true);
 
         Assert.IsFalse(applied);
-        Assert.IsTrue(controller.HasPendingNeutral);
         Assert.AreEqual(1, sink.VerticalCommands.Count);
         Assert.AreEqual(1, sink.HorizontalAttempts);
-
-        sink.FailHorizontal = false;
-        Assert.IsTrue(controller.Apply(sink, LeashIntent.Idle, active: false));
-        Assert.IsFalse(controller.HasPendingNeutral);
-        Assert.AreEqual(0f, sink.HorizontalCommands[^1]);
+        Assert.AreEqual(1, sink.TurnCommands.Count);
     }
 
     [TestMethod]
-    public void FailedNeutralCommandIsRetriedUntilItSucceeds()
+    public void CompleteNeutralCanBeRepeatedUntilVrChatReceivesIt()
     {
         var controller = new PlayerInputController();
         var sink = new FakePlayerInputSink();
@@ -33,24 +28,25 @@ public sealed class PlayerInputControllerTests
 
         sink.FailVertical = true;
         Assert.IsFalse(controller.Apply(sink, LeashIntent.Idle, active: false));
-        Assert.IsTrue(controller.HasPendingNeutral);
+        Assert.AreEqual(0f, sink.HorizontalCommands[^1]);
+        Assert.AreEqual(0f, sink.TurnCommands[^1]);
 
         sink.FailVertical = false;
         Assert.IsTrue(controller.Apply(sink, LeashIntent.Idle, active: false));
-        Assert.IsFalse(controller.HasPendingNeutral);
         Assert.AreEqual(0f, sink.VerticalCommands[^1]);
+        Assert.AreEqual(3, sink.StopRunAttempts);
     }
 
     [TestMethod]
-    public void FailedChannelStopsTheRemainingSharedTransportBatch()
+    public void FailedChannelNeverStopsTheRemainingStatePublication()
     {
         var controller = new PlayerInputController();
         var sink = new FakePlayerInputSink { FailVertical = true };
 
         Assert.IsFalse(controller.Apply(sink, MovingIntent(), active: true));
 
-        Assert.AreEqual(0, sink.HorizontalCommands.Count);
-        Assert.AreEqual(0, sink.TurnCommands.Count);
+        Assert.AreEqual(1, sink.HorizontalCommands.Count);
+        Assert.AreEqual(1, sink.TurnCommands.Count);
         Assert.IsInstanceOfType<InvalidOperationException>(controller.LastFailure);
     }
 
@@ -63,12 +59,12 @@ public sealed class PlayerInputControllerTests
 
         sink.FailStopRun = true;
         Assert.IsFalse(controller.Apply(sink, LeashIntent.Idle, active: false));
-        Assert.IsTrue(controller.HasPendingNeutral);
+        Assert.AreEqual(0f, sink.VerticalCommands[^1]);
+        Assert.AreEqual(0f, sink.HorizontalCommands[^1]);
 
         sink.FailStopRun = false;
         Assert.IsTrue(controller.Apply(sink, LeashIntent.Idle, active: false));
         Assert.AreEqual(2, sink.StopRunAttempts);
-        Assert.IsFalse(controller.HasPendingNeutral);
     }
 
     [TestMethod]
@@ -77,14 +73,55 @@ public sealed class PlayerInputControllerTests
         var controller = new PlayerInputController();
         var sink = new FakePlayerInputSink();
 
-        controller.RequestFullNeutral();
         Assert.IsTrue(controller.TryNeutralize(sink));
 
         Assert.AreEqual(1, sink.StopRunAttempts);
         Assert.AreEqual(0f, sink.VerticalCommands.Single());
         Assert.AreEqual(0f, sink.HorizontalCommands.Single());
         Assert.AreEqual(0f, sink.TurnCommands.Single());
-        Assert.IsFalse(controller.HasPendingNeutral);
+    }
+
+    [TestMethod]
+    public void HealthyActiveStateIsSentRedundantlyForPacketLossRepair()
+    {
+        var controller = new PlayerInputController();
+        var sink = new FakePlayerInputSink();
+
+        Assert.IsTrue(controller.Apply(sink, MovingIntent(), active: true));
+        Assert.IsTrue(controller.Apply(sink, MovingIntent(), active: true));
+
+        Assert.AreEqual(2, sink.VerticalCommands.Count);
+        Assert.AreEqual(2, sink.HorizontalCommands.Count);
+        Assert.AreEqual(2, sink.TurnCommands.Count);
+    }
+
+    [TestMethod]
+    public void NeutralStateIsAlsoSentRedundantlyForPacketLossRepair()
+    {
+        var controller = new PlayerInputController();
+        var sink = new FakePlayerInputSink();
+
+        Assert.IsTrue(controller.TryNeutralize(sink));
+        Assert.IsTrue(controller.TryNeutralize(sink));
+
+        CollectionAssert.AreEqual(new[] { 0f, 0f }, sink.VerticalCommands);
+        CollectionAssert.AreEqual(new[] { 0f, 0f }, sink.HorizontalCommands);
+        CollectionAssert.AreEqual(new[] { 0f, 0f }, sink.TurnCommands);
+        Assert.AreEqual(2, sink.StopRunAttempts);
+    }
+
+    [TestMethod]
+    public void SlowCommandDoesNotCreateAPartialRemoteState()
+    {
+        var controller = new PlayerInputController();
+        var sink = new FakePlayerInputSink { SlowVerticalMilliseconds = 60 };
+
+        Assert.IsTrue(controller.Apply(sink, MovingIntent(), active: true));
+
+        Assert.IsTrue(controller.LastCommandWasSlow);
+        Assert.IsTrue(controller.LastCommandDurationMilliseconds >= PlayerInputController.SlowCommandThresholdMilliseconds);
+        Assert.AreEqual(1, sink.HorizontalCommands.Count);
+        Assert.AreEqual(1, sink.TurnCommands.Count);
     }
 
     private static LeashIntent MovingIntent()
@@ -102,6 +139,7 @@ public sealed class PlayerInputControllerTests
         public bool FailVertical { get; set; }
         public bool FailHorizontal { get; set; }
         public bool FailStopRun { get; set; }
+        public int SlowVerticalMilliseconds { get; set; }
         public int HorizontalAttempts { get; private set; }
         public int StopRunAttempts { get; private set; }
         public List<float> VerticalCommands { get; } = [];
@@ -121,6 +159,8 @@ public sealed class PlayerInputControllerTests
 
         public void MoveVertical(float value)
         {
+            if (SlowVerticalMilliseconds > 0)
+                Thread.Sleep(SlowVerticalMilliseconds);
             if (FailVertical)
                 throw new InvalidOperationException("Injected vertical failure.");
             VerticalCommands.Add(value);

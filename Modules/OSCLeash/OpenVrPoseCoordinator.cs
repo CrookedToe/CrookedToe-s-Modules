@@ -209,6 +209,20 @@ internal sealed class OpenVrPoseCoordinator
             return readResult;
 
         _connected = true;
+        if (_ownership.OwnsPose)
+        {
+            if (!_ownership.LivePoseMatchesLastWrite(livePose))
+            {
+                _ownership.YieldToExternalPose(livePose);
+                return PoseUpdateResult.ExternalWriterActive;
+            }
+
+            // Never adopt a pose containing our own offset as a new baseline. Doing so
+            // discards the only copy of the original standing pose and makes cleanup or
+            // return-to-origin target the displaced height instead.
+            return PoseUpdateResult.NoChange;
+        }
+
         _ownership.CaptureBaseline(livePose);
         return PoseUpdateResult.Success;
     }

@@ -48,6 +48,8 @@ Scores are model-relative confidence values, not verified probabilities of inter
 - VAD: adaptive energy detector with start/stop hysteresis
 - Pure laughter/crying: model-event activity latch keeps vocal state and inference alive when speech VAD drops
 - Output: confidence-weighted attack/release smoothing at 10 Hz
+- Output transport: the complete state remains redundantly published at 10 Hz while healthy; a send taking at least 50 ms stops that batch and enters a bounded 100 ms to 2 second retry backoff
+- VRCOSC compatibility: non-ChatBox output is filtered before ChatBox-preview UI dispatch so expression publication cannot synchronously wait on that view
 - Silence: 350 ms utterance endpoint, 500 ms expression hold, 1.5-second fade, 3.5-second reset
 - Privacy: no network, telemetry, transcription, or persistent audio storage
 

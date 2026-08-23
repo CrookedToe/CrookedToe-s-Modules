@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using VRCOSC.App.Audio;
+using CrookedToe.Modules.Diagnostics;
 
 namespace CrookedToe.Modules.OSCVoiceEmotion;
 
@@ -83,12 +84,24 @@ internal sealed class VoiceEmotionRuntime : IAsyncDisposable
     private long _eventActivityUntilTicks;
     private int _resetEvidenceRequested;
     private long _lastWarningTicks;
+    private readonly DiagnosticProbe? _captureProbe;
+    private readonly DiagnosticProbe? _inferenceProbe;
+    private readonly DiagnosticProbe? _outputProbe;
     public event Action<EmotionState>? StateChanged;
     public event Action<string>? Warning;
 
-    public VoiceEmotionRuntime(IEmotionInferenceBackend backend, VoiceEmotionOptions? options = null, string selectedDeviceId = "")
+    public VoiceEmotionRuntime(
+        IEmotionInferenceBackend backend,
+        VoiceEmotionOptions? options = null,
+        string selectedDeviceId = "",
+        DiagnosticProbe? captureProbe = null,
+        DiagnosticProbe? inferenceProbe = null,
+        DiagnosticProbe? outputProbe = null)
     {
         _options = options ?? new(); _backend = backend;
+        _captureProbe = captureProbe;
+        _inferenceProbe = inferenceProbe;
+        _outputProbe = outputProbe;
         _capture = new MicrophoneCapture(selectedDeviceId);
         _captureSampleRate = _capture.SampleRate;
         _buffer = new FloatRingBuffer((int)(_captureSampleRate * _options.BufferCapacity.TotalSeconds));
@@ -102,6 +115,7 @@ internal sealed class VoiceEmotionRuntime : IAsyncDisposable
     public void Start() { _capture.Start(); _loop = Task.Run(RunAsync); }
     private void OnSamples(ReadOnlyMemory<float> memory, DateTimeOffset timestamp)
     {
+        using DiagnosticScope measurement = _captureProbe?.Measure() ?? default;
         ReadOnlySpan<float> samples = memory.Span;
         float vad = _vad.Analyze(samples);
         bool wasSpeaking = _speaking.IsSpeaking;
@@ -149,6 +163,7 @@ internal sealed class VoiceEmotionRuntime : IAsyncDisposable
                 {
                     if (await nextOutput.ConfigureAwait(false))
                     {
+                        using DiagnosticScope measurement = _outputProbe?.Measure() ?? default;
                         long ticks = Interlocked.Read(ref _lastSpeechTicks);
                         TimeSpan silence = ticks == 0 ? TimeSpan.MaxValue : now - new DateTimeOffset(ticks, TimeSpan.Zero);
                         bool modelEventActive = now.UtcTicks < Interlocked.Read(ref _eventActivityUntilTicks);
@@ -180,6 +195,7 @@ internal sealed class VoiceEmotionRuntime : IAsyncDisposable
 
     private bool TryInferNewest(DateTimeOffset now, bool final)
     {
+        using DiagnosticScope measurement = _inferenceProbe?.Measure() ?? default;
         try { InferNewest(now, final); return true; }
         catch (Exception ex) { ReportWarning($"SenseVoice inference failed: {ex.Message}"); return false; }
     }

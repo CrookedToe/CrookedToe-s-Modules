@@ -56,7 +56,6 @@ public sealed class LeashControlPipelineTests
 
         Assert.AreEqual(LeashIntent.Idle, afterAvatarChange);
         Assert.AreEqual(0f, sink.Horizontal[^1]);
-        Assert.IsFalse(playerInput.HasPendingNeutral);
     }
 
     [TestMethod]

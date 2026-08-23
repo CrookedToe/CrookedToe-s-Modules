@@ -1,5 +1,8 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Diagnostics;
+using CrookedToe.Modules.Compatibility;
+using CrookedToe.Modules.Diagnostics;
 using VRCOSC.App.SDK.Modules;
 using VRCOSC.App.Utils;
 
@@ -20,6 +23,14 @@ public class OSCSerialBridgeModule : Module
     private List<SerialMappingSnapshot> activeMappings = [];
     private List<SerialIncomingRouteSnapshot> activeIncomingRoutes = [];
     private volatile bool _isStopping;
+    private ModuleDiagnostics? _diagnostics;
+    private DiagnosticProbe? _configurationProbe;
+    private DiagnosticProbe? _queueProbe;
+    private DiagnosticProbe? _incomingRoutesProbe;
+    private DiagnosticProbe? _serialCallbackProbe;
+    private long _enqueuedLines;
+    private long _processedLines;
+    private long _nextQueueSnapshot;
 
     public SerialDeviceModuleSetting DevicesSetting => GetSetting<SerialDeviceModuleSetting>(SerialBridgeSetting.Devices);
     public SerialMappingModuleSetting MappingsSetting => GetSetting<SerialMappingModuleSetting>(SerialBridgeSetting.Mappings);
@@ -38,11 +49,12 @@ public class OSCSerialBridgeModule : Module
 
     protected override Task<bool> OnModuleStart()
     {
+        StartDiagnostics();
         _isStopping = false;
         Log("Starting OSC Serial Bridge module...");
 
         deviceManager = new SerialDeviceManager(
-            line => queuedLines.Enqueue(line),
+            EnqueueLine,
             message => Log(message),
             LogErrorOnce);
 
@@ -69,6 +81,7 @@ public class OSCSerialBridgeModule : Module
         }
 
         Log("OSC Serial Bridge module stopped");
+        StopDiagnostics();
         return Task.CompletedTask;
     }
 
@@ -78,6 +91,7 @@ public class OSCSerialBridgeModule : Module
         if (_isStopping)
             return;
 
+        using DiagnosticScope measurement = _configurationProbe?.Measure() ?? default;
         RebuildRuntimeConfiguration();
     }
 
@@ -87,6 +101,9 @@ public class OSCSerialBridgeModule : Module
         if (_isStopping)
             return;
 
+        using DiagnosticScope measurement = _queueProbe?.Measure() ?? default;
+        VrcOscUiDispatchWorkaround.ApplyIfDue();
+
         int processedPackets = 0;
 
         while (processedPackets < MaxPacketsPerTick && queuedLines.TryDequeue(out var queuedLine))
@@ -94,6 +111,9 @@ public class OSCSerialBridgeModule : Module
             processedPackets++;
             ProcessQueuedLine(queuedLine);
         }
+
+        Interlocked.Add(ref _processedLines, processedPackets);
+        LogQueueSnapshotIfDue();
     }
 
     private void RebuildRuntimeConfiguration()
@@ -139,6 +159,8 @@ public class OSCSerialBridgeModule : Module
     {
         if (_isStopping)
             return;
+
+        using DiagnosticScope measurement = _incomingRoutesProbe?.Measure() ?? default;
 
         foreach (var route in activeIncomingRoutes)
         {
@@ -371,4 +393,46 @@ public class OSCSerialBridgeModule : Module
 
     private static string Sanitize(string preferredValue, string fallbackValue) =>
         string.IsNullOrWhiteSpace(preferredValue) ? fallbackValue.Trim() : preferredValue.Trim();
+
+    private void EnqueueLine(QueuedSerialLine line)
+    {
+        using DiagnosticScope measurement = _serialCallbackProbe?.Measure() ?? default;
+        queuedLines.Enqueue(line);
+        Interlocked.Increment(ref _enqueuedLines);
+    }
+
+    private void LogQueueSnapshotIfDue()
+    {
+        long now = Stopwatch.GetTimestamp();
+        long due = Volatile.Read(ref _nextQueueSnapshot);
+        if (now < due || Interlocked.CompareExchange(ref _nextQueueSnapshot, now + Stopwatch.Frequency * 10, due) != due)
+            return;
+
+        _diagnostics?.Event("queue_snapshot",
+            $"depth={queuedLines.Count};enqueued={Interlocked.Exchange(ref _enqueuedLines, 0)};processed={Interlocked.Exchange(ref _processedLines, 0)}");
+    }
+
+    private void StartDiagnostics()
+    {
+        StopDiagnostics();
+        _diagnostics = BoundedDiagnostics.StartModule("OSCSerialBridge");
+        _configurationProbe = _diagnostics.CreateProbe("configuration_refresh", 500);
+        _queueProbe = _diagnostics.CreateProbe("queue_processing", 20);
+        _incomingRoutesProbe = _diagnostics.CreateProbe("incoming_routes", 50);
+        _serialCallbackProbe = _diagnostics.CreateProbe("serial_callback");
+        _nextQueueSnapshot = Stopwatch.GetTimestamp() + Stopwatch.Frequency * 10;
+        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
+        if (patchedObservers > 0)
+            _diagnostics.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
+    }
+
+    private void StopDiagnostics()
+    {
+        _diagnostics?.Dispose();
+        _diagnostics = null;
+        _configurationProbe = null;
+        _queueProbe = null;
+        _incomingRoutesProbe = null;
+        _serialCallbackProbe = null;
+    }
 }
