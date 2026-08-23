@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using VRCOSC.App.SDK.VRChat;
 
 namespace CrookedToe.Modules.OSCLeash;
@@ -22,102 +23,56 @@ internal sealed class VrcPlayerInputSink(Player player) : IPlayerInputSink
 
 internal sealed class PlayerInputController
 {
-    private bool _runOwned;
-    private bool _verticalOwned;
-    private bool _horizontalOwned;
-    private bool _turnOwned;
-
-    public bool HasPendingNeutral => _runOwned || _verticalOwned || _horizontalOwned || _turnOwned;
+    internal const double SlowCommandThresholdMilliseconds = 50d;
     public Exception? LastFailure { get; private set; }
-
-    public void RequestFullNeutral()
-    {
-        _runOwned = true;
-        _verticalOwned = true;
-        _horizontalOwned = true;
-        _turnOwned = true;
-    }
+    public bool LastCommandWasSlow { get; private set; }
+    public double LastCommandDurationMilliseconds { get; private set; }
 
     public bool Apply(IPlayerInputSink sink, LeashIntent intent, bool active)
     {
-        LastFailure = null;
-        return active ? ApplyActive(sink, intent) : TryNeutralizeCore(sink);
+        ResetAttemptState();
+        bool succeeded = true;
+
+        // OSC is unacknowledged UDP. Always publish a complete snapshot, including
+        // zeroes, and attempt every channel even when an earlier send fails or stalls.
+        // Local "ownership" cannot prove that VRChat received a previous packet.
+        succeeded &= Try(active && intent.ShouldRun ? sink.Run : sink.StopRun);
+        succeeded &= Try(() => sink.MoveVertical(active ? Sanitize(intent.MoveZ) : 0f));
+        succeeded &= Try(() => sink.MoveHorizontal(active ? Sanitize(intent.MoveX) : 0f));
+        succeeded &= Try(() => sink.LookHorizontal(active && intent.HasTurnInput ? Sanitize(intent.TurnValue) : 0f));
+        return succeeded;
     }
 
-    public bool TryNeutralize(IPlayerInputSink sink)
-    {
-        LastFailure = null;
-        return TryNeutralizeCore(sink);
-    }
-
-    private bool ApplyActive(IPlayerInputSink sink, LeashIntent intent)
-    {
-        if (!ApplyButton(sink, intent.ShouldRun))
-            return false;
-        if (!ApplyAxis(ref _verticalOwned, intent.MoveZ, sink.MoveVertical))
-            return false;
-        if (!ApplyAxis(ref _horizontalOwned, intent.MoveX, sink.MoveHorizontal))
-            return false;
-        return ApplyAxis(
-            ref _turnOwned,
-            intent.HasTurnInput ? intent.TurnValue : 0f,
-            sink.LookHorizontal);
-    }
-
-    private bool TryNeutralizeCore(IPlayerInputSink sink)
-    {
-        if (!TryRelease(ref _runOwned, sink.StopRun))
-            return false;
-        if (!TryRelease(ref _verticalOwned, () => sink.MoveVertical(0f)))
-            return false;
-        if (!TryRelease(ref _horizontalOwned, () => sink.MoveHorizontal(0f)))
-            return false;
-        return TryRelease(ref _turnOwned, () => sink.LookHorizontal(0f));
-    }
-
-    private bool ApplyButton(IPlayerInputSink sink, bool pressed)
-    {
-        if (!pressed)
-            return TryRelease(ref _runOwned, sink.StopRun);
-
-        _runOwned = true;
-        return Try(sink.Run);
-    }
-
-    private bool ApplyAxis(ref bool owned, float value, Action<float> command)
-    {
-        value = float.IsFinite(value) ? Math.Clamp(value, -1f, 1f) : 0f;
-        owned = true;
-        if (!Try(() => command(value)))
-            return false;
-
-        if (MathF.Abs(value) <= LeashDefaults.NormalizeEpsilon)
-            owned = false;
-        return true;
-    }
-
-    private bool TryRelease(ref bool owned, Action command)
-    {
-        if (!owned)
-            return true;
-        if (!Try(command))
-            return false;
-
-        owned = false;
-        return true;
-    }
+    public bool TryNeutralize(IPlayerInputSink sink) => Apply(sink, LeashIntent.Idle, active: false);
 
     private bool Try(Action command)
     {
+        long started = Stopwatch.GetTimestamp();
+        bool succeeded = true;
         try
         {
             command();
-            return true;
         }
         catch (Exception ex)
         {
             LastFailure ??= ex;
-            return false;
+            succeeded = false;
         }
+
+        double duration = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        LastCommandDurationMilliseconds = Math.Max(LastCommandDurationMilliseconds, duration);
+        if (duration >= SlowCommandThresholdMilliseconds)
+            LastCommandWasSlow = true;
+        return succeeded;
+    }
+
+    private static float Sanitize(float value)
+        => float.IsFinite(value) ? Math.Clamp(value, -1f, 1f) : 0f;
+
+    private void ResetAttemptState()
+    {
+        LastFailure = null;
+        LastCommandWasSlow = false;
+        LastCommandDurationMilliseconds = 0d;
     }
 }

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using CrookedToe.Modules.Compatibility;
+using CrookedToe.Modules.Diagnostics;
 using NAudio.Wave;
 using VRCOSC.App.SDK.Modules;
 using VRCOSC.App.SDK.Parameters;
@@ -43,6 +45,7 @@ public class OSCAudioReactionModule : Module
     private const float MaximumCaptureRetrySeconds = 30f;
     private const float InitialPublicationRetrySeconds = 0.1f;
     private const float MaximumPublicationRetrySeconds = 2f;
+    private const double SlowPublicationCommandMilliseconds = 50d;
     private static readonly long FailureLogCooldown = Stopwatch.Frequency * 5;
     private static readonly long HealthLogInterval = Stopwatch.Frequency * 60;
 
@@ -81,6 +84,11 @@ public class OSCAudioReactionModule : Module
     private bool _currentSpike;
     private bool _settingsNeedRefresh = true;
     private volatile bool _isStopping;
+    private ModuleDiagnostics? _diagnostics;
+    private DiagnosticProbe? _updateProbe;
+    private DiagnosticProbe? _captureCallbackProbe;
+    private DiagnosticProbe? _processingProbe;
+    private DiagnosticProbe? _publicationProbe;
 
     protected override void OnPreLoad()
     {
@@ -95,6 +103,7 @@ public class OSCAudioReactionModule : Module
 
     protected override async Task<bool> OnModuleStart()
     {
+        StartDiagnostics();
         _isStopping = false;
         ResetRuntimeState();
         Log("Starting OSC Audio Reaction module...");
@@ -106,6 +115,7 @@ public class OSCAudioReactionModule : Module
             {
                 Log("Failed to initialize default audio device");
                 await CleanupAudioResourcesAsync();
+                StopDiagnostics();
                 return false;
             }
 
@@ -116,6 +126,7 @@ public class OSCAudioReactionModule : Module
                     ? "No audio wave format available after initialization"
                     : $"Unsupported audio format: {waveFormat.SampleRate}Hz, {waveFormat.BitsPerSample}-bit, {waveFormat.Channels}ch, {waveFormat.Encoding}");
                 await CleanupAudioResourcesAsync();
+                StopDiagnostics();
                 return false;
             }
 
@@ -128,6 +139,7 @@ public class OSCAudioReactionModule : Module
             {
                 Log("OSC Audio Reaction could not enter the capturing state");
                 await CleanupAudioResourcesAsync();
+                StopDiagnostics();
                 return false;
             }
 
@@ -138,6 +150,7 @@ public class OSCAudioReactionModule : Module
         {
             Log($"Module start failed: {ex.Message}");
             await CleanupAudioResourcesAsync();
+            StopDiagnostics();
             return false;
         }
     }
@@ -160,6 +173,7 @@ public class OSCAudioReactionModule : Module
         await CleanupAudioResourcesAsync();
         ResetRuntimeState();
         Log("OSC Audio Reaction module stopped");
+        StopDiagnostics();
     }
 
     [ModuleUpdate(ModuleUpdateMode.Custom, true, UpdateIntervalMilliseconds)]
@@ -167,6 +181,9 @@ public class OSCAudioReactionModule : Module
     {
         if (_isStopping)
             return;
+
+        using DiagnosticScope updateMeasurement = _updateProbe?.Measure() ?? default;
+        VrcOscUiDispatchWorkaround.ApplyIfDue();
 
         long now = Stopwatch.GetTimestamp();
 
@@ -189,6 +206,8 @@ public class OSCAudioReactionModule : Module
     {
         if (_isStopping)
             return;
+
+        using DiagnosticScope callbackMeasurement = _captureCallbackProbe?.Measure() ?? default;
 
         try
         {
@@ -225,6 +244,7 @@ public class OSCAudioReactionModule : Module
 
     private void ProcessLatestFrame(long now)
     {
+        using DiagnosticScope processingMeasurement = _processingProbe?.Measure() ?? default;
         LatestAudioFrameBuffer? frames = _audioFrames;
         byte[]? processingBuffer = _processingBuffer;
         AudioProcessor? processor = _audioProcessor;
@@ -266,18 +286,25 @@ public class OSCAudioReactionModule : Module
 
     private bool TryPublishCurrentState(string operation, bool force = false)
     {
+        using DiagnosticScope publicationMeasurement = _publicationProbe?.Measure() ?? default;
         long now = Stopwatch.GetTimestamp();
         if (!force && now < _nextPublicationTimestamp)
             return false;
 
         try
         {
-            SendParameter(AudioParameter.AudioVolume, _currentVolume);
-            SendParameter(AudioParameter.AudioDirection, _currentDirection);
-            SendParameter(AudioParameter.AudioSpike, _currentSpike);
+            if (!TrySendParameter(AudioParameter.AudioVolume, _currentVolume, out double slowMilliseconds) ||
+                !TrySendParameter(AudioParameter.AudioDirection, _currentDirection, out slowMilliseconds) ||
+                !TrySendParameter(AudioParameter.AudioSpike, _currentSpike, out slowMilliseconds))
+            {
+                return RegisterPublicationFailure(operation, null, slowMilliseconds, Stopwatch.GetTimestamp());
+            }
 
             for (int i = 0; i < AudioBandDefinitions.Count; i++)
-                SendParameter(FrequencyBandMappings[i].Parameter, _currentBands[i]);
+            {
+                if (!TrySendParameter(FrequencyBandMappings[i].Parameter, _currentBands[i], out slowMilliseconds))
+                    return RegisterPublicationFailure(operation, null, slowMilliseconds, Stopwatch.GetTimestamp());
+            }
 
             if (_consecutivePublicationFailures > 0)
                 Log("OSC Audio Reaction publication recovered");
@@ -289,21 +316,41 @@ public class OSCAudioReactionModule : Module
         }
         catch (Exception ex)
         {
-            _consecutivePublicationFailures++;
-            int exponent = Math.Min(_consecutivePublicationFailures - 1, 5);
-            float delaySeconds = Math.Min(
-                InitialPublicationRetrySeconds * (1 << exponent),
-                MaximumPublicationRetrySeconds);
-            _nextPublicationTimestamp = AddSeconds(now, delaySeconds);
-            if (_consecutivePublicationFailures == 1 ||
-                now - _lastPublicationFailureLogTimestamp >= FailureLogCooldown)
-            {
-                _lastPublicationFailureLogTimestamp = now;
-                Log($"OSC Audio Reaction could not {operation} ({_consecutivePublicationFailures} consecutive): {ex.Message}");
-            }
-
-            return false;
+            return RegisterPublicationFailure(operation, ex, 0d, Stopwatch.GetTimestamp());
         }
+    }
+
+    private bool TrySendParameter(AudioParameter parameter, object value, out double slowMilliseconds)
+    {
+        long started = Stopwatch.GetTimestamp();
+        SendParameter(parameter, value);
+        slowMilliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        return slowMilliseconds < SlowPublicationCommandMilliseconds;
+    }
+
+    private bool RegisterPublicationFailure(string operation, Exception? exception, double slowMilliseconds, long now)
+    {
+        _consecutivePublicationFailures++;
+        int exponent = Math.Min(_consecutivePublicationFailures - 1, 5);
+        float delaySeconds = Math.Min(
+            InitialPublicationRetrySeconds * (1 << exponent),
+            MaximumPublicationRetrySeconds);
+        _nextPublicationTimestamp = AddSeconds(now, delaySeconds);
+
+        bool slow = slowMilliseconds >= SlowPublicationCommandMilliseconds;
+        if (_consecutivePublicationFailures == 1 || now - _lastPublicationFailureLogTimestamp >= FailureLogCooldown)
+        {
+            _lastPublicationFailureLogTimestamp = now;
+            string detail = slow
+                ? $"an individual parameter send took {slowMilliseconds:F0}ms"
+                : exception?.Message ?? "unknown transport failure";
+            Log($"OSC Audio Reaction could not {operation} ({_consecutivePublicationFailures} consecutive): {detail}. " +
+                "The rest of this batch was skipped to protect VRCOSC responsiveness.");
+            _diagnostics?.Event(
+                slow ? "parameter_publication_slow" : "parameter_publication_failure",
+                $"consecutive={_consecutivePublicationFailures};durationMs={slowMilliseconds:F1};exception={exception?.GetType().Name}:{exception?.Message}");
+        }
+        return false;
     }
 
     private void RequestCaptureRecovery(string reason)
@@ -640,5 +687,28 @@ public class OSCAudioReactionModule : Module
             ScaleFrequencyWithVolume = GetSettingValue<bool>(AudioSetting.ScaleFrequencyWithVolume),
             BandEnabled = bandEnabled
         };
+    }
+
+    private void StartDiagnostics()
+    {
+        StopDiagnostics();
+        _diagnostics = BoundedDiagnostics.StartModule("OSCAudioReaction");
+        _updateProbe = _diagnostics.CreateProbe("update_loop", UpdateIntervalMilliseconds);
+        _captureCallbackProbe = _diagnostics.CreateProbe("capture_callback");
+        _processingProbe = _diagnostics.CreateProbe("frame_processing");
+        _publicationProbe = _diagnostics.CreateProbe("parameter_publication");
+        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
+        if (patchedObservers > 0)
+            _diagnostics.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
+    }
+
+    private void StopDiagnostics()
+    {
+        _diagnostics?.Dispose();
+        _diagnostics = null;
+        _updateProbe = null;
+        _captureCallbackProbe = null;
+        _processingProbe = null;
+        _publicationProbe = null;
     }
 }

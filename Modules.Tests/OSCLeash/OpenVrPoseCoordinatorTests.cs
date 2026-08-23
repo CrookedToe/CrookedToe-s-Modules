@@ -62,6 +62,25 @@ public sealed class OpenVrPoseCoordinatorTests
         Assert.IsFalse(coordinator.OwnsPose);
     }
 
+    [TestMethod]
+    public void RefreshBaselineNeverAdoptsAnOwnedOffset()
+    {
+        HmdMatrix34_t baseline = IdentityPose(y: 1f);
+        var backend = new FakeStandingPoseBackend(baseline);
+        var coordinator = new OpenVrPoseCoordinator(backend);
+        Assert.AreEqual(PoseUpdateResult.Success, coordinator.TryConnect());
+        Assert.AreEqual(PoseUpdateResult.Success, coordinator.ApplyOffset(-0.6f));
+
+        PoseUpdateResult refreshResult = coordinator.RefreshBaseline();
+
+        Assert.AreEqual(PoseUpdateResult.NoChange, refreshResult);
+        Assert.IsTrue(coordinator.OwnsPose);
+        Assert.AreEqual(1f, coordinator.ReferenceHeight, 0.0001f);
+        Assert.AreEqual(-0.6f, coordinator.LastAppliedOffset, 0.0001f);
+        Assert.AreEqual(PoseUpdateResult.Success, coordinator.RemoveOwnOffset());
+        Assert.IsTrue(StandingPoseMath.ApproximatelyEquals(baseline, backend.LivePose));
+    }
+
     private static HmdMatrix34_t IdentityPose(float x = 0f, float y = 0f, float z = 0f)
         => new()
         {
