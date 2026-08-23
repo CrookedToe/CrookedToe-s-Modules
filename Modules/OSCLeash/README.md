@@ -36,7 +36,6 @@ This is a C# port of [ZenithVal's OSCLeash](https://github.com/ZenithVal/OSCLeas
 | `Leash_Y+` | Float | Upward pull |
 | `Leash_Y-` | Float | Downward pull |
 | `leash_disable` | Bool | Optional. `true` disables motion. Missing or `false` leaves it enabled. |
-| `leash_enable` | Bool | Optional legacy gate. Used only if the current avatar actually has this parameter. |
 
 ## Settings
 
