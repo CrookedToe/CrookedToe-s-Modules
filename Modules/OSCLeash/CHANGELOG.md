@@ -2,11 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## [1.3.7] - 2026-08-23
+
+### Added
+- Optional `leash_disable` parameter. `true` disables motion; missing or `false` is safe.
+
+### Changed
+- Publish a complete VRChat movement state, including zeroes, and keep sending every channel even if one send fails or stalls.
+- Pause movement after a short OSC gap and clear the old pull vector before accepting recovered input. A two-second drop still requires release and a new grab.
+- Simplified the README and removed the OVR Advanced Settings compatibility note.
 
 ### Fixed
-- Yield to external OpenVR standing-pose writers instead of fighting OVRAS
-- Automatically rebase and resume after a one-time or completed OVRAS pose change
+- One failed or slow VRChat input channel no longer aborts the rest of the movement state.
+
+## [1.3.6] - 2026-08-01
+
+### Fixed
+- Yield to external OpenVR standing-pose writers instead of fighting them
+- Automatically rebase and resume after a one-time or completed external pose change
 - Use working-pose preview rather than committing chaperone state during motion
 - Restore neutral VRChat movement and turn inputs when the module stops
 - Keep cleanup ownership state across transient OpenVR failures

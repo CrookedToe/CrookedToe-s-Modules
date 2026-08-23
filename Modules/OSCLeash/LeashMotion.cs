@@ -7,9 +7,11 @@ internal static class LeashDefaults
     public const float MaxDeltaTimeSeconds = 0.05f;
     public const float ExternalPoseQuietSeconds = 0.25f;
     public const float VrRetryIntervalSeconds = 2f;
+    public const float MotionSilenceSeconds = 0.3f;
     public const float InputFreshnessSeconds = 2f;
-    public const float PlayerRetryInitialSeconds = 0.1f;
-    public const float PlayerRetryMaximumSeconds = 2f;
+    public const float PlayerPublishIntervalSeconds = 0.05f;
+    public const float NeutralRepairSeconds = 2f;
+    public const int StopNeutralRepetitions = 3;
     public const float HealthLogIntervalSeconds = 60f;
     public const float TurnEpsilon = 0.0001f;
     public const float NormalizeEpsilon = 0.0001f;

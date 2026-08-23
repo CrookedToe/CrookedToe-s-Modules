@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using CrookedToe.Modules.Compatibility;
+using CrookedToe.Modules.Diagnostics;
 using VRCOSC.App.SDK.Modules;
 using VRCOSC.App.SDK.Parameters;
 using VRCOSC.App.SDK.VRChat;
@@ -47,17 +49,31 @@ public class OSCLeashModule : Module
     private readonly ExternalPoseRecoveryState _poseRecovery = new();
     private readonly OpenVrPoseCoordinator _openVr = new();
 
-    private bool _wasGrabbedForMotion;
+    private ModuleDiagnostics? _diagnostics;
+    private DiagnosticProbe? _updateProbe;
+    private DiagnosticProbe? _settingsProbe;
+    private DiagnosticProbe? _openVrProbe;
+    private DiagnosticProbe? _playerInputProbe;
+    private DiagnosticProbe? _oscInputProbe;
+
+    private bool _wasLeashEngaged;
     private bool _isStopping;
     private long _lastUpdateTimestamp;
     private long _nextVrRetryTimestamp;
-    private long _nextPlayerRetryTimestamp;
+    private long _nextPlayerPublishTimestamp;
+    private long _neutralRepairUntilTimestamp;
     private long _lastVrWarningTimestamp;
     private long _lastPlayerWarningTimestamp;
     private long _lastPlayerSuccessTimestamp;
     private long _lastHealthLogTimestamp;
     private int _consecutivePlayerFailures;
     private bool _inputWasStale;
+    private bool _motionInputWasSilent;
+    private bool? _lastObservedGrabbed;
+    private bool? _lastObservedEnable;
+    private bool? _lastObservedDisable;
+    private long _playerPublicationsSinceHealth;
+    private long _neutralPublicationsSinceHealth;
     private PoseUpdateResult _lastLoggedVrResult = PoseUpdateResult.NoChange;
     private LeashSettings _settings;
 
@@ -70,9 +86,12 @@ public class OSCLeashModule : Module
 
     protected override Task<bool> OnModuleStart()
     {
+        StartDiagnostics();
         _isStopping = false;
         ResetLeashState();
-        TryNeutralizePlayerInput(forceAll: true);
+        ConfigureAvatarParameters(GetClient().Avatar);
+        BeginNeutralRepair(Stopwatch.GetTimestamp());
+        TryNeutralizePlayerInput(LeashDefaults.StopNeutralRepetitions);
         Log("OSC Leash module started");
         return Task.FromResult(true);
     }
@@ -80,20 +99,23 @@ public class OSCLeashModule : Module
     protected override Task OnModuleStop()
     {
         _isStopping = true;
-        TryNeutralizePlayerInput(forceAll: true);
+        TryNeutralizePlayerInput(LeashDefaults.StopNeutralRepetitions);
         PoseUpdateResult cleanupResult = _openVr.RemoveOwnOffset();
         if (cleanupResult is not PoseUpdateResult.Success and not PoseUpdateResult.NoChange)
             Log($"OSC Leash height cleanup: {cleanupResult}");
 
         ClearState(clearOpenVrOwnership: cleanupResult is PoseUpdateResult.Success or PoseUpdateResult.NoChange);
         Log("OSC Leash module stopped");
+        StopDiagnostics();
         return Task.CompletedTask;
     }
 
     protected override void OnAvatarChange(Avatar? avatar)
     {
         ResetLeashState();
-        TryNeutralizePlayerInput(forceAll: true);
+        ConfigureAvatarParameters(avatar);
+        BeginNeutralRepair(Stopwatch.GetTimestamp());
+        TryNeutralizePlayerInput(LeashDefaults.StopNeutralRepetitions);
 
         PoseUpdateResult cleanupResult = _openVr.RemoveOwnOffset();
         HandleVrResult(cleanupResult, "clean up after avatar change", Stopwatch.GetTimestamp());
@@ -109,7 +131,7 @@ public class OSCLeashModule : Module
             return;
 
         ResetLeashState();
-        _playerInput.RequestFullNeutral();
+        BeginNeutralRepair(Stopwatch.GetTimestamp());
     }
 
     private void CreateSettings()
@@ -131,6 +153,7 @@ public class OSCLeashModule : Module
     {
         RegisterParameter<bool>(OSCLeashParameter.IsGrabbed, "Leash_IsGrabbed", ParameterMode.Read, "Leash Grabbed", "Whether the leash is being held");
         RegisterParameter<bool>(OSCLeashParameter.LeashEnable, "leash_enable", ParameterMode.Read, "Leash Enable", "Enables or disables leash motion");
+        RegisterParameter<bool>(OSCLeashParameter.LeashDisable, "leash_disable", ParameterMode.Read, "Leash Disable", "Disables leash motion when true (preferred optional gate)");
 
         foreach (var (key, address, name, description) in FloatParameters)
             RegisterParameter<float>(key, address, ParameterMode.Read, name, description);
@@ -167,22 +190,32 @@ public class OSCLeashModule : Module
         if (_isStopping)
             return;
 
+        using DiagnosticScope updateMeasurement = _updateProbe?.Measure() ?? default;
+        VrcOscUiDispatchWorkaround.ApplyIfDue();
+
         long now = Stopwatch.GetTimestamp();
         float deltaTime = GetDeltaTime(now);
-        RefreshSettings();
+        using (_settingsProbe?.Measure() ?? default)
+            RefreshSettings();
         ObserveInputFreshness(now);
 
-        bool grabbedForMotion = _input.GrabbedForMotion;
-        bool justGrabbed = grabbedForMotion && !_wasGrabbedForMotion;
-        bool justReleased = !grabbedForMotion && _wasGrabbedForMotion;
-        _wasGrabbedForMotion = grabbedForMotion;
+        bool leashEngaged = _input.LeashEngaged;
+        bool motionActive = _input.GrabbedForMotion;
+        bool justGrabbed = leashEngaged && !_wasLeashEngaged;
+        bool justReleased = !leashEngaged && _wasLeashEngaged;
+        _wasLeashEngaged = leashEngaged;
+        if (justReleased)
+            BeginNeutralRepair(now);
 
-        LeashIntent intent = _motion.Resolve(_input.Signal, _settings, grabbedForMotion);
+        LeashIntent intent = _motion.Resolve(_input.Signal, _settings, motionActive);
 
-        MaintainOpenVrConnection(now);
-        UpdateVerticalMotion(intent, grabbedForMotion, justGrabbed, justReleased, deltaTime, now);
+        using (_openVrProbe?.Measure() ?? default)
+        {
+            MaintainOpenVrConnection(now);
+            UpdateVerticalMotion(intent, leashEngaged, motionActive, justGrabbed, justReleased, deltaTime, now);
+        }
 
-        UpdatePlayerMovement(intent, grabbedForMotion, now);
+        UpdatePlayerMovement(intent, motionActive, justGrabbed || justReleased, now);
 
         LogHealthIfDue(now);
     }
@@ -260,7 +293,8 @@ public class OSCLeashModule : Module
 
     private void UpdateVerticalMotion(
         LeashIntent intent,
-        bool grabbedForMotion,
+        bool leashEngaged,
+        bool motionActive,
         bool justGrabbed,
         bool justReleased,
         float deltaTime,
@@ -273,12 +307,17 @@ public class OSCLeashModule : Module
         {
             PoseUpdateResult refreshResult = _openVr.RefreshBaseline();
             HandleVrResult(refreshResult, "capture grab height", now);
-            if (refreshResult != PoseUpdateResult.Success)
+            if (refreshResult is not PoseUpdateResult.Success and not PoseUpdateResult.NoChange)
                 return;
 
-            _verticalMotion.Reset();
+            if (refreshResult == PoseUpdateResult.Success)
+                _verticalMotion.Reset();
+            else
+                _verticalMotion.Rebase(_openVr.LastAppliedOffset);
             _poseRecovery.Reset();
-            LogDebug($"Leash grabbed at OpenVR height {_openVr.ReferenceHeight:F3}");
+            LogDebug(
+                $"Leash grabbed at OpenVR height {_openVr.ReferenceHeight:F3} " +
+                $"with owned offset {_openVr.LastAppliedOffset:F3}");
         }
 
         if (justReleased)
@@ -287,13 +326,13 @@ public class OSCLeashModule : Module
             LogDebug($"Leash released at height offset {_verticalMotion.Offset:F3}");
         }
 
-        if (_poseRecovery.Suspended && !TryResumeAfterExternalPoseSettles(grabbedForMotion, now))
+        if (_poseRecovery.Suspended && !TryResumeAfterExternalPoseSettles(leashEngaged, now))
             return;
 
         bool changed = _verticalMotion.Constrain(_settings.MaximumVerticalOffset);
-        if (grabbedForMotion)
+        if (leashEngaged)
         {
-            if (!intent.VerticalModeActive)
+            if (!motionActive || !intent.VerticalModeActive)
             {
                 _verticalMotion.Rebase(_openVr.LastAppliedOffset);
                 changed = _verticalMotion.Constrain(_settings.MaximumVerticalOffset);
@@ -348,7 +387,8 @@ public class OSCLeashModule : Module
     private void SuspendForExternalWriter(long now)
     {
         _verticalMotion.Reset();
-        bool willRetryAutomatically = _poseRecovery.Suspend(_wasGrabbedForMotion, TimestampSeconds(now));
+        bool willRetryAutomatically = _poseRecovery.Suspend(_wasLeashEngaged, TimestampSeconds(now));
+        _diagnostics?.Event("external_pose_writer", willRetryAutomatically ? "waiting_to_resume" : "locked_until_regrab");
         if (!willRetryAutomatically)
         {
             Log("Warning: another application repeatedly changed the OpenVR standing pose. " +
@@ -359,9 +399,9 @@ public class OSCLeashModule : Module
         Log("OpenVR standing pose changed externally. OSC Leash is waiting for it to settle before resuming height drag.");
     }
 
-    private bool TryResumeAfterExternalPoseSettles(bool grabbedForMotion, long now)
+    private bool TryResumeAfterExternalPoseSettles(bool leashEngaged, long now)
     {
-        if (!grabbedForMotion || _poseRecovery.LockedUntilRegrab)
+        if (!leashEngaged || _poseRecovery.LockedUntilRegrab)
             return false;
 
         PoseUpdateResult result = _openVr.ObserveExternalPose(out bool changed);
@@ -372,7 +412,7 @@ public class OSCLeashModule : Module
         }
 
         bool resumed = _poseRecovery.Observe(
-            grabbedForMotion,
+            leashEngaged,
             changed,
             TimestampSeconds(now),
             LeashDefaults.ExternalPoseQuietSeconds);
@@ -380,6 +420,7 @@ public class OSCLeashModule : Module
             return false;
 
         _verticalMotion.Reset();
+        _diagnostics?.Event("external_pose_writer_recovered");
         Log("OpenVR standing pose is stable; OSC Leash height drag resumed from the new baseline.");
         return true;
     }
@@ -392,9 +433,10 @@ public class OSCLeashModule : Module
         if (expired)
         {
             _motion.Reset();
-            _playerInput.RequestFullNeutral();
+            BeginNeutralRepair(now);
             if (!_inputWasStale)
             {
+                _diagnostics?.Event("osc_input_stale", $"timeoutSeconds={LeashDefaults.InputFreshnessSeconds:F0}");
                 Log($"OSC Leash input stopped for more than {LeashDefaults.InputFreshnessSeconds:F0}s. " +
                     "Movement was neutralized; release and re-grab the leash before continuing.");
             }
@@ -403,17 +445,43 @@ public class OSCLeashModule : Module
             return;
         }
 
+        bool motionSilenced = _input.SuppressMotionIfSilent(
+            now,
+            (long)(LeashDefaults.MotionSilenceSeconds * Stopwatch.Frequency));
+        if (motionSilenced)
+        {
+            _motion.Reset();
+            BeginNeutralRepair(now);
+            _motionInputWasSilent = true;
+            _diagnostics?.Event(
+                "osc_motion_silenced",
+                $"timeoutMilliseconds={LeashDefaults.MotionSilenceSeconds * 1000f:F0}");
+        }
+
+        if (_motionInputWasSilent && !_input.MotionSuppressed)
+        {
+            _motionInputWasSilent = false;
+            _diagnostics?.Event("osc_motion_recovered");
+        }
+
         if (!_inputWasStale || !_input.HasReceivedInput || _input.RequiresGrabRelease)
             return;
 
         _inputWasStale = false;
+        _diagnostics?.Event("osc_input_recovered");
         Log("OSC Leash input recovered.");
     }
 
-    private void UpdatePlayerMovement(LeashIntent intent, bool grabbedForMotion, long now)
+    private void UpdatePlayerMovement(LeashIntent intent, bool grabbedForMotion, bool forcePublish, long now)
     {
-        if (now < _nextPlayerRetryTimestamp)
+        bool repairingNeutral = !grabbedForMotion && now < _neutralRepairUntilTimestamp;
+        if (!grabbedForMotion && !repairingNeutral && !forcePublish)
             return;
+        if (!forcePublish && now < _nextPlayerPublishTimestamp)
+            return;
+
+        _nextPlayerPublishTimestamp = AddSeconds(now, LeashDefaults.PlayerPublishIntervalSeconds);
+        using DiagnosticScope publicationMeasurement = _playerInputProbe?.Measure() ?? default;
 
         Player? player;
         try
@@ -422,7 +490,7 @@ public class OSCLeashModule : Module
         }
         catch (Exception ex)
         {
-            HandlePlayerInputResult(success: false, ex, now, scheduleRetry: true);
+            HandlePlayerInputResult(success: false, ex, slowCommand: false, slowDurationMilliseconds: 0d, now);
             return;
         }
 
@@ -430,14 +498,19 @@ public class OSCLeashModule : Module
             return;
 
         bool success = _playerInput.Apply(new VrcPlayerInputSink(player), intent, grabbedForMotion);
-        HandlePlayerInputResult(success, _playerInput.LastFailure, now, scheduleRetry: true);
+        _playerPublicationsSinceHealth++;
+        if (!grabbedForMotion)
+            _neutralPublicationsSinceHealth++;
+        HandlePlayerInputResult(
+            success,
+            _playerInput.LastFailure,
+            _playerInput.LastCommandWasSlow,
+            _playerInput.LastCommandDurationMilliseconds,
+            Stopwatch.GetTimestamp());
     }
 
-    private void TryNeutralizePlayerInput(bool forceAll = false)
+    private void TryNeutralizePlayerInput(int repetitions = 1)
     {
-        if (forceAll)
-            _playerInput.RequestFullNeutral();
-
         Player? player;
         try
         {
@@ -445,54 +518,76 @@ public class OSCLeashModule : Module
         }
         catch (Exception ex)
         {
-            HandlePlayerInputResult(success: false, ex, Stopwatch.GetTimestamp(), scheduleRetry: false);
+            HandlePlayerInputResult(
+                success: false,
+                ex,
+                slowCommand: false,
+                slowDurationMilliseconds: 0d,
+                Stopwatch.GetTimestamp());
             return;
         }
 
         if (player is null)
             return;
 
-        bool success = _playerInput.TryNeutralize(new VrcPlayerInputSink(player));
-        HandlePlayerInputResult(
-            success,
-            _playerInput.LastFailure,
-            Stopwatch.GetTimestamp(),
-            scheduleRetry: false);
+        var sink = new VrcPlayerInputSink(player);
+        for (int i = 0; i < repetitions; i++)
+        {
+            bool success = _playerInput.TryNeutralize(sink);
+            _playerPublicationsSinceHealth++;
+            _neutralPublicationsSinceHealth++;
+            HandlePlayerInputResult(
+                success,
+                _playerInput.LastFailure,
+                _playerInput.LastCommandWasSlow,
+                _playerInput.LastCommandDurationMilliseconds,
+                Stopwatch.GetTimestamp());
+        }
     }
 
     private void HandlePlayerInputResult(
         bool success,
         Exception? failure,
-        long now,
-        bool scheduleRetry)
+        bool slowCommand,
+        double slowDurationMilliseconds,
+        long now)
     {
+        if (slowCommand && SecondsSince(_lastPlayerWarningTimestamp, now) >= 5f)
+        {
+            _diagnostics?.Event("player_input_slow", $"durationMs={slowDurationMilliseconds:F1}");
+            Log($"Warning: a complete OSC Leash state took a slow player-input send " +
+                $"({slowDurationMilliseconds:F0}ms max command). All remaining channels were still attempted.");
+            _lastPlayerWarningTimestamp = now;
+        }
+
         if (success)
         {
             _lastPlayerSuccessTimestamp = now;
-            _nextPlayerRetryTimestamp = 0;
             if (_consecutivePlayerFailures > 0)
+            {
+                _diagnostics?.Event("player_input_recovered", $"failedBatches={_consecutivePlayerFailures}");
                 Log($"OSC Leash player input recovered after {_consecutivePlayerFailures} failed batches.");
+            }
             _consecutivePlayerFailures = 0;
             return;
         }
 
         _consecutivePlayerFailures++;
-        if (scheduleRetry)
-        {
-            int exponent = Math.Min(_consecutivePlayerFailures - 1, 5);
-            float delaySeconds = Math.Min(
-                LeashDefaults.PlayerRetryInitialSeconds * (1 << exponent),
-                LeashDefaults.PlayerRetryMaximumSeconds);
-            _nextPlayerRetryTimestamp = AddSeconds(now, delaySeconds);
-        }
-
         if (SecondsSince(_lastPlayerWarningTimestamp, now) < 5f)
             return;
 
         string detail = failure is null ? string.Empty : $" {failure.GetType().Name}: {failure.Message}";
-        Log($"Warning: VRChat rejected an OSC Leash player-input batch " +
-            $"({_consecutivePlayerFailures} consecutive). Remaining commands were skipped and neutral cleanup remains pending.{detail}");
+        _diagnostics?.Event("player_input_failure",
+            $"consecutive={_consecutivePlayerFailures};exception={detail.Trim()}");
+        Log($"Warning: VRChat rejected part of an OSC Leash state " +
+            $"({_consecutivePlayerFailures} consecutive failed publications). Every channel was attempted and the complete state will be repeated.{detail}");
         _lastPlayerWarningTimestamp = now;
+    }
+
+    private void BeginNeutralRepair(long now)
+    {
+        _neutralRepairUntilTimestamp = AddSeconds(now, LeashDefaults.NeutralRepairSeconds);
+        _nextPlayerPublishTimestamp = 0;
     }
 
     private void LogHealthIfDue(long now)
@@ -506,10 +601,26 @@ public class OSCLeashModule : Module
         string playerAge = _lastPlayerSuccessTimestamp == 0
             ? "none"
             : $"{SecondsSince(_lastPlayerSuccessTimestamp, now):F1}s";
+        long publications = Interlocked.Exchange(ref _playerPublicationsSinceHealth, 0);
+        long neutralPublications = Interlocked.Exchange(ref _neutralPublicationsSinceHealth, 0);
+        LeashInputSnapshot snapshot = _input.Snapshot;
+        string state =
+            $"grabbed={snapshot.IsGrabbed};enabled={snapshot.LeashEnabled};" +
+            $"enablePresent={snapshot.HasLeashEnableParameter};disablePresent={snapshot.HasLeashDisableParameter};" +
+            $"releaseRequired={snapshot.RequiresGrabRelease};motionSuppressed={snapshot.MotionSuppressed};" +
+            $"stretch={snapshot.Stretch:F3};x={snapshot.NetX:F3};y={snapshot.NetY:F3};z={snapshot.NetZ:F3};" +
+            $"inputAge={inputAge};stale={_inputWasStale};" +
+            $"playerPublications={publications};neutralPublications={neutralPublications}";
+        _diagnostics?.Event("leash_state", state);
         LogDebug(
             $"OSC Leash health: inputAge={inputAge}, stale={_inputWasStale}, " +
-            $"releaseRequired={_input.RequiresGrabRelease}, playerSuccessAge={playerAge}, " +
-            $"playerFailures={_consecutivePlayerFailures}, neutralPending={_playerInput.HasPendingNeutral}, " +
+            $"grabbed={snapshot.IsGrabbed}, enabled={snapshot.LeashEnabled}, " +
+            $"enablePresent={snapshot.HasLeashEnableParameter}, disablePresent={snapshot.HasLeashDisableParameter}, " +
+            $"releaseRequired={snapshot.RequiresGrabRelease}, motionSuppressed={snapshot.MotionSuppressed}, " +
+            $"signal=({snapshot.NetX:F2},{snapshot.NetY:F2},{snapshot.NetZ:F2}) stretch={snapshot.Stretch:F2}, " +
+            $"playerSuccessAge={playerAge}, " +
+            $"playerFailures={_consecutivePlayerFailures}, publications={publications}, " +
+            $"neutralPublications={neutralPublications}, neutralRepair={now < _neutralRepairUntilTimestamp}, " +
             $"openVrConnected={_openVr.Connected}");
         _lastHealthLogTimestamp = now;
     }
@@ -524,6 +635,7 @@ public class OSCLeashModule : Module
             return;
 
         Log($"Warning: OpenVR could not {operation}: {result}");
+        _diagnostics?.Event("openvr_failure", $"operation={operation};result={result}");
         _lastLoggedVrResult = result;
         _lastVrWarningTimestamp = now;
     }
@@ -532,13 +644,20 @@ public class OSCLeashModule : Module
     {
         _input.Reset();
         _motion.Reset();
-        _wasGrabbedForMotion = false;
+        _wasLeashEngaged = false;
         _poseRecovery.Reset();
         _lastUpdateTimestamp = 0;
         _nextVrRetryTimestamp = 0;
-        _nextPlayerRetryTimestamp = 0;
+        _nextPlayerPublishTimestamp = 0;
+        _neutralRepairUntilTimestamp = 0;
         _verticalMotion.Reset();
         _inputWasStale = false;
+        _motionInputWasSilent = false;
+        _lastObservedGrabbed = null;
+        _lastObservedEnable = null;
+        _lastObservedDisable = null;
+        _playerPublicationsSinceHealth = 0;
+        _neutralPublicationsSinceHealth = 0;
     }
 
     private void ClearState(bool clearOpenVrOwnership)
@@ -570,16 +689,77 @@ public class OSCLeashModule : Module
         if (_isStopping)
             return;
 
+        using DiagnosticScope inputMeasurement = _oscInputProbe?.Measure() ?? default;
+
         OSCLeashParameter key = (OSCLeashParameter)parameter.Lookup;
         switch (key)
         {
             case OSCLeashParameter.IsGrabbed:
+                ObserveBooleanInput(key, parameter.GetValue<bool>(), ref _lastObservedGrabbed);
+                break;
             case OSCLeashParameter.LeashEnable:
-                _input.Set(key, parameter.GetValue<bool>());
+                ObserveBooleanInput(key, parameter.GetValue<bool>(), ref _lastObservedEnable);
+                break;
+            case OSCLeashParameter.LeashDisable:
+                ObserveBooleanInput(key, parameter.GetValue<bool>(), ref _lastObservedDisable);
                 break;
             default:
                 _input.Set(key, parameter.GetValue<float>());
                 break;
         }
+    }
+
+    private void ConfigureAvatarParameters(Avatar? avatar)
+    {
+        bool hasOptionalEnable = avatar?.Parameters.Any(parameter =>
+            string.Equals(parameter.Name, "leash_enable", StringComparison.Ordinal)) == true;
+        bool hasOptionalDisable = avatar?.Parameters.Any(parameter =>
+            string.Equals(parameter.Name, "leash_disable", StringComparison.Ordinal)) == true;
+        _input.ConfigureOptionalGates(hasOptionalEnable, hasOptionalDisable);
+        _diagnostics?.Event(
+            "avatar_parameter_capabilities",
+            $"avatar={avatar?.Id ?? "none"};leashEnablePresent={hasOptionalEnable};" +
+            $"leashDisablePresent={hasOptionalDisable}");
+    }
+
+    private void ObserveBooleanInput(OSCLeashParameter key, bool value, ref bool? previous)
+    {
+        _input.Set(key, value);
+        if (previous == value)
+            return;
+
+        previous = value;
+        LeashInputSnapshot snapshot = _input.Snapshot;
+        _diagnostics?.Event(
+            "leash_gate_change",
+            $"parameter={key};value={value};active={_input.GrabbedForMotion};" +
+            $"enablePresent={snapshot.HasLeashEnableParameter};disablePresent={snapshot.HasLeashDisableParameter};" +
+            $"releaseRequired={snapshot.RequiresGrabRelease}");
+    }
+
+    private void StartDiagnostics()
+    {
+        StopDiagnostics();
+        _diagnostics = BoundedDiagnostics.StartModule("OSCLeash");
+        _updateProbe = _diagnostics.CreateProbe("control_loop", LeashDefaults.UpdateIntervalMilliseconds);
+        _settingsProbe = _diagnostics.CreateProbe("settings_refresh");
+        _openVrProbe = _diagnostics.CreateProbe("openvr_stage");
+        _playerInputProbe = _diagnostics.CreateProbe("player_state_publication");
+        _oscInputProbe = _diagnostics.CreateProbe("osc_input_callback");
+        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
+        if (patchedObservers > 0)
+            _diagnostics.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
+        Log($"Performance diagnostics: {_diagnostics.LogDirectory} (bounded to {BoundedDiagnostics.RetainedFileCount} x {BoundedDiagnostics.MaxFileBytes / 1024 / 1024} MiB files)");
+    }
+
+    private void StopDiagnostics()
+    {
+        _diagnostics?.Dispose();
+        _diagnostics = null;
+        _updateProbe = null;
+        _settingsProbe = null;
+        _openVrProbe = null;
+        _playerInputProbe = null;
+        _oscInputProbe = null;
     }
 }

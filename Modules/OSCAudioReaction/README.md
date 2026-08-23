@@ -54,7 +54,8 @@ Disabled bands always output `0`.
 - Frequency outputs are normalized per enabled-band power unless volume scaling is enabled
 - The audio callback only copies into a bounded latest-frame buffer. Processing and all ten parameter sends run from one 50 ms module update.
 - Every update republishes the complete output state so a missed OSC packet is naturally repaired without a second resend loop.
-- A rejected publication stops that update's shared send batch and retries with a bounded 100 ms to 2 second backoff; successful publication immediately restores the normal 50 ms rate.
+- A rejected publication or an individual synchronous VRCOSC send taking at least 50 ms stops that update's shared send batch and retries with a bounded 100 ms to 2 second backoff; successful publication immediately restores the normal complete-state 50 ms rate.
+- A VRCOSC 2026 compatibility workaround keeps non-ChatBox parameter sends off the synchronous ChatBox-preview UI dispatcher path. It does not reduce healthy redundant sends.
 - If capture stops or the default output device changes, outputs immediately return to neutral and capture retries with bounded backoff.
 - A low-rate debug health line reports callback, processing, coalescing, publication, and recovery state without per-frame logging.
 
