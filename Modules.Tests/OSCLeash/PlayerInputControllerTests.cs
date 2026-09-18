@@ -111,17 +111,50 @@ public sealed class PlayerInputControllerTests
     }
 
     [TestMethod]
-    public void SlowCommandDoesNotCreateAPartialRemoteState()
+    public void SlowCommandDiscardsOldIntentAndRepairsEveryChannel()
     {
         var controller = new PlayerInputController();
         var sink = new FakePlayerInputSink { SlowVerticalMilliseconds = 60 };
 
-        Assert.IsTrue(controller.Apply(sink, MovingIntent(), active: true));
+        Assert.IsTrue(controller.Apply(sink, MovingIntent() with { ShouldRun = true }, active: true));
 
         Assert.IsTrue(controller.LastCommandWasSlow);
         Assert.IsTrue(controller.LastCommandDurationMilliseconds >= PlayerInputController.SlowCommandThresholdMilliseconds);
-        Assert.AreEqual(1, sink.HorizontalCommands.Count);
-        Assert.AreEqual(1, sink.TurnCommands.Count);
+        Assert.AreEqual(0f, sink.VerticalCommands[^1]);
+        Assert.IsTrue(sink.HorizontalCommands.All(value => value == 0f));
+        Assert.IsTrue(sink.TurnCommands.All(value => value == 0f));
+        Assert.AreEqual(1, sink.StopRunAttempts);
+
+        sink.SlowVerticalMilliseconds = 0;
+        Assert.IsTrue(controller.Apply(sink, MovingIntent(), active: true));
+        Assert.AreEqual(MovingIntent().MoveX, sink.HorizontalCommands[^1]);
+        Assert.AreEqual(MovingIntent().MoveZ, sink.VerticalCommands[^1]);
+    }
+
+    [TestMethod]
+    public void ReleaseDuringSendNeutralizesAlreadySentAndRemainingChannels()
+    {
+        var controller = new PlayerInputController();
+        bool grabbed = true;
+        var sink = new FakePlayerInputSink { OnVertical = () => grabbed = false };
+
+        Assert.IsTrue(controller.Apply(sink, MovingIntent() with { ShouldRun = true }, true, () => grabbed));
+
+        CollectionAssert.AreEqual(new[] { MovingIntent().MoveZ, 0f }, sink.VerticalCommands);
+        Assert.IsTrue(sink.HorizontalCommands.All(value => value == 0f));
+        Assert.IsTrue(sink.TurnCommands.All(value => value == 0f));
+        Assert.AreEqual(1, sink.StopRunAttempts);
+    }
+
+    [TestMethod]
+    public void InputAlreadyStaleBeforePublicationCannotStartMovement()
+    {
+        var controller = new PlayerInputController();
+        var sink = new FakePlayerInputSink();
+        Assert.IsTrue(controller.Apply(sink, MovingIntent() with { ShouldRun = true }, true, () => false));
+        Assert.IsTrue(sink.VerticalCommands.All(value => value == 0f));
+        Assert.IsTrue(sink.HorizontalCommands.All(value => value == 0f));
+        Assert.IsTrue(sink.TurnCommands.All(value => value == 0f));
     }
 
     private static LeashIntent MovingIntent()
@@ -136,6 +169,7 @@ public sealed class PlayerInputControllerTests
 
     private sealed class FakePlayerInputSink : IPlayerInputSink
     {
+        public Action? OnVertical { get; set; }
         public bool FailVertical { get; set; }
         public bool FailHorizontal { get; set; }
         public bool FailStopRun { get; set; }
@@ -164,6 +198,7 @@ public sealed class PlayerInputControllerTests
             if (FailVertical)
                 throw new InvalidOperationException("Injected vertical failure.");
             VerticalCommands.Add(value);
+            OnVertical?.Invoke();
         }
 
         public void MoveHorizontal(float value)

@@ -77,6 +77,9 @@ public class OSCLeashModule : Module
     private PoseUpdateResult _lastLoggedVrResult = PoseUpdateResult.NoChange;
     private LeashSettings _settings;
 
+    private new void Log(string message) => RealtimeModuleLog.Write(this, message);
+    private new void LogDebug(string message) => RealtimeModuleLog.Write(this, message, debug: true);
+
     protected override void OnPreLoad()
     {
         CreateSettings();
@@ -191,7 +194,9 @@ public class OSCLeashModule : Module
             return;
 
         using DiagnosticScope updateMeasurement = _updateProbe?.Measure() ?? default;
-        VrcOscUiDispatchWorkaround.ApplyIfDue();
+        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue();
+        if (patchedObservers > 0)
+            _diagnostics?.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
 
         long now = Stopwatch.GetTimestamp();
         float deltaTime = GetDeltaTime(now);
@@ -199,15 +204,16 @@ public class OSCLeashModule : Module
             RefreshSettings();
         ObserveInputFreshness(now);
 
-        bool leashEngaged = _input.LeashEngaged;
-        bool motionActive = _input.GrabbedForMotion;
+        LeashInputSnapshot snapshot = _input.Snapshot;
+        bool leashEngaged = snapshot.LeashEngaged;
+        bool motionActive = snapshot.GrabbedForMotion;
         bool justGrabbed = leashEngaged && !_wasLeashEngaged;
         bool justReleased = !leashEngaged && _wasLeashEngaged;
         _wasLeashEngaged = leashEngaged;
         if (justReleased)
             BeginNeutralRepair(now);
 
-        LeashIntent intent = _motion.Resolve(_input.Signal, _settings, motionActive);
+        LeashIntent intent = _motion.Resolve(snapshot.Signal, _settings, motionActive);
 
         using (_openVrProbe?.Measure() ?? default)
         {
@@ -215,9 +221,16 @@ public class OSCLeashModule : Module
             UpdateVerticalMotion(intent, leashEngaged, motionActive, justGrabbed, justReleased, deltaTime, now);
         }
 
-        UpdatePlayerMovement(intent, motionActive, justGrabbed || justReleased, now);
+        // Native pose work can stall. Do not publish the direction or grab state that
+        // was sampled before that call; input callbacks continue while it is blocked.
+        now = Stopwatch.GetTimestamp();
+        ObserveInputFreshness(now);
+        snapshot = _input.Snapshot;
+        intent = _motion.Resolve(snapshot.Signal, _settings, snapshot.GrabbedForMotion);
+        UpdatePlayerMovement(intent, snapshot.GrabbedForMotion, justGrabbed || justReleased ||
+            (motionActive && !snapshot.GrabbedForMotion), now);
 
-        LogHealthIfDue(now);
+        LogHealthIfDue(Stopwatch.GetTimestamp());
     }
 
     private float GetDeltaTime(long now)
@@ -307,6 +320,11 @@ public class OSCLeashModule : Module
         {
             PoseUpdateResult refreshResult = _openVr.RefreshBaseline();
             HandleVrResult(refreshResult, "capture grab height", now);
+            if (refreshResult == PoseUpdateResult.ExternalWriterActive)
+            {
+                SuspendForExternalWriter(now);
+                return;
+            }
             if (refreshResult is not PoseUpdateResult.Success and not PoseUpdateResult.NoChange)
                 return;
 
@@ -315,6 +333,8 @@ public class OSCLeashModule : Module
             else
                 _verticalMotion.Rebase(_openVr.LastAppliedOffset);
             _poseRecovery.Reset();
+            _diagnostics?.Event("height_grab_baseline",
+                $"source=active_tracking_origin;referenceHeight={_openVr.ReferenceHeight:F3};ownedOffset={_openVr.LastAppliedOffset:F3}");
             LogDebug(
                 $"Leash grabbed at OpenVR height {_openVr.ReferenceHeight:F3} " +
                 $"with owned offset {_openVr.LastAppliedOffset:F3}");
@@ -323,6 +343,8 @@ public class OSCLeashModule : Module
         if (justReleased)
         {
             _verticalMotion.Rebase(_openVr.LastAppliedOffset);
+            _diagnostics?.Event("height_release",
+                $"referenceHeight={_openVr.ReferenceHeight:F3};ownedOffset={_verticalMotion.Offset:F3}");
             LogDebug($"Leash released at height offset {_verticalMotion.Offset:F3}");
         }
 
@@ -497,7 +519,7 @@ public class OSCLeashModule : Module
         if (player is null)
             return;
 
-        bool success = _playerInput.Apply(new VrcPlayerInputSink(player), intent, grabbedForMotion);
+        bool success = _playerInput.Apply(new VrcPlayerInputSink(player), intent, grabbedForMotion, _input.CanContinueMotion);
         _playerPublicationsSinceHealth++;
         if (!grabbedForMotion)
             _neutralPublicationsSinceHealth++;
@@ -679,7 +701,7 @@ public class OSCLeashModule : Module
         => timestamp + (long)(seconds * Stopwatch.Frequency);
 
     private static float SecondsSince(long earlier, long now)
-        => earlier == 0 ? float.MaxValue : (float)((now - earlier) / (double)Stopwatch.Frequency);
+        => earlier == 0 ? float.MaxValue : Math.Max(0f, (float)((now - earlier) / (double)Stopwatch.Frequency));
 
     private static double TimestampSeconds(long timestamp)
         => timestamp / (double)Stopwatch.Frequency;
@@ -746,9 +768,8 @@ public class OSCLeashModule : Module
         _openVrProbe = _diagnostics.CreateProbe("openvr_stage");
         _playerInputProbe = _diagnostics.CreateProbe("player_state_publication");
         _oscInputProbe = _diagnostics.CreateProbe("osc_input_callback");
-        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
-        if (patchedObservers > 0)
-            _diagnostics.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
+        VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
+        _diagnostics.Event("vrcosc_dispatch_workaround", VrcOscUiDispatchWorkaround.Status);
         Log($"Performance diagnostics: {_diagnostics.LogDirectory} (bounded to {BoundedDiagnostics.RetainedFileCount} x {BoundedDiagnostics.MaxFileBytes / 1024 / 1024} MiB files)");
     }
 

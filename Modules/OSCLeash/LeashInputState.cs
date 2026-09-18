@@ -112,7 +112,7 @@ internal sealed class LeashInputState
         {
             return _lastInputTimestamp == 0
                 ? float.MaxValue
-                : (float)((now - _lastInputTimestamp) / (double)Stopwatch.Frequency);
+                : Math.Max(0f, (float)((now - _lastInputTimestamp) / (double)Stopwatch.Frequency));
         }
     }
 
@@ -220,6 +220,13 @@ internal sealed class LeashInputState
         }
     }
 
+    public bool CanContinueMotion()
+    {
+        lock (_gate)
+            return IsLeashEngagedUnsafe() && !_motionSuppressed && _lastInputTimestamp != 0 &&
+                   Stopwatch.GetTimestamp() - _lastInputTimestamp <= LeashDefaults.MotionSilenceSeconds * Stopwatch.Frequency;
+    }
+
     public void Reset()
     {
         lock (_gate)
@@ -272,4 +279,9 @@ internal readonly record struct LeashInputSnapshot(
     float Stretch,
     float NetX,
     float NetY,
-    float NetZ);
+    float NetZ)
+{
+    public bool LeashEngaged => IsGrabbed && LeashEnabled && !RequiresGrabRelease;
+    public bool GrabbedForMotion => LeashEngaged && !MotionSuppressed;
+    public LeashSignal Signal => LeashSignal.From(NetX, NetY, NetZ, Stretch);
+}

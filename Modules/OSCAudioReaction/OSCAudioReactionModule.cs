@@ -90,6 +90,9 @@ public class OSCAudioReactionModule : Module
     private DiagnosticProbe? _processingProbe;
     private DiagnosticProbe? _publicationProbe;
 
+    private new void Log(string message) => RealtimeModuleLog.Write(this, message);
+    private new void LogDebug(string message) => RealtimeModuleLog.Write(this, message, debug: true);
+
     protected override void OnPreLoad()
     {
         RegisterAudioParameters();
@@ -183,7 +186,9 @@ public class OSCAudioReactionModule : Module
             return;
 
         using DiagnosticScope updateMeasurement = _updateProbe?.Measure() ?? default;
-        VrcOscUiDispatchWorkaround.ApplyIfDue();
+        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue();
+        if (patchedObservers > 0)
+            _diagnostics?.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
 
         long now = Stopwatch.GetTimestamp();
 
@@ -697,9 +702,8 @@ public class OSCAudioReactionModule : Module
         _captureCallbackProbe = _diagnostics.CreateProbe("capture_callback");
         _processingProbe = _diagnostics.CreateProbe("frame_processing");
         _publicationProbe = _diagnostics.CreateProbe("parameter_publication");
-        int patchedObservers = VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
-        if (patchedObservers > 0)
-            _diagnostics.Event("vrcosc_dispatch_workaround", $"patchedObservers={patchedObservers}");
+        VrcOscUiDispatchWorkaround.ApplyIfDue(force: true);
+        _diagnostics.Event("vrcosc_dispatch_workaround", VrcOscUiDispatchWorkaround.Status);
     }
 
     private void StopDiagnostics()

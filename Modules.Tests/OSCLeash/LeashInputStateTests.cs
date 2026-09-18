@@ -6,6 +6,42 @@ namespace CrookedToesModules.Tests.OSCLeash;
 public sealed class LeashInputStateTests
 {
     [TestMethod]
+    public void SnapshotKeepsSignalAndGatesFromTheSameInstant()
+    {
+        var input = new LeashInputState();
+        input.Set(OSCLeashParameter.IsGrabbed, true);
+        input.Set(OSCLeashParameter.XPositive, 0.75f);
+        input.Set(OSCLeashParameter.Stretch, 1f);
+        var snapshot = input.Snapshot;
+        input.Reset();
+        Assert.IsTrue(snapshot.GrabbedForMotion);
+        Assert.AreEqual(0.75f, snapshot.Signal.NetX);
+        Assert.IsFalse(input.Snapshot.GrabbedForMotion);
+        Assert.AreEqual(0f, input.Snapshot.Signal.NetX);
+    }
+
+    [TestMethod]
+    public void OutputFreshnessGuardDoesNotRequireTheControlLoopToNoticeASilence()
+    {
+        var input = new LeashInputState();
+        input.Set(OSCLeashParameter.IsGrabbed, true, timestamp: 1);
+        Assert.IsTrue(input.GrabbedForMotion);
+        Assert.IsFalse(input.CanContinueMotion());
+        input.Set(OSCLeashParameter.Stretch, 1f);
+        Assert.IsTrue(input.CanContinueMotion());
+        input.Set(OSCLeashParameter.IsGrabbed, false);
+        Assert.IsFalse(input.CanContinueMotion());
+    }
+
+    [TestMethod]
+    public void ConcurrentNewerInputCannotProduceANegativeDiagnosticAge()
+    {
+        var input = new LeashInputState();
+        input.Set(OSCLeashParameter.Stretch, 1f, timestamp: 200);
+        Assert.AreEqual(0f, input.InputAgeSeconds(100));
+    }
+
+    [TestMethod]
     public void ResetInvalidatesEveryValueFromThePreviousAvatar()
     {
         var input = new LeashInputState();

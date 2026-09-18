@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.8] - 2026-09-18
+
+### Fixed
+- Read the active OpenVR tracking origin instead of the client's chaperone working copy, preserving OVR Advanced Settings space drag when capturing and returning to grab height.
+- Detect OVR takeover during height return and cleanup even if the local working copy still contains the leash's last write.
+- Enter external-pose recovery when a takeover is detected on re-grab, rather than continuing with a stale height offset.
+- Reject invalid tracking transforms and add grab/release baseline diagnostics.
+- Activate the VRCOSC dispatcher workaround by resolving the actual client field.
+- Keep movement/audio sends independent of chatbox UI delays; bound preview updates and release closed views.
+- Move leash/audio host logging to a shared bounded worker so UI and file writes do not stall control work.
+- Recheck leash input after OpenVR work and neutralize commands invalidated during a stalled output batch.
+- Record the exact development-build identity and correct negative health ages.
+
+See [the investigation](DEGRADATION-AUDIT.md) for capture evidence and regression validation.
+
 ## [1.3.7] - 2026-08-23
 
 ### Added

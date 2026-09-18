@@ -28,7 +28,7 @@ internal sealed class PlayerInputController
     public bool LastCommandWasSlow { get; private set; }
     public double LastCommandDurationMilliseconds { get; private set; }
 
-    public bool Apply(IPlayerInputSink sink, LeashIntent intent, bool active)
+    public bool Apply(IPlayerInputSink sink, LeashIntent intent, bool active, Func<bool>? canContinueMotion = null)
     {
         ResetAttemptState();
         bool succeeded = true;
@@ -36,11 +36,31 @@ internal sealed class PlayerInputController
         // OSC is unacknowledged UDP. Always publish a complete snapshot, including
         // zeroes, and attempt every channel even when an earlier send fails or stalls.
         // Local "ownership" cannot prove that VRChat received a previous packet.
-        succeeded &= Try(active && intent.ShouldRun ? sink.Run : sink.StopRun);
-        succeeded &= Try(() => sink.MoveVertical(active ? Sanitize(intent.MoveZ) : 0f));
-        succeeded &= Try(() => sink.MoveHorizontal(active ? Sanitize(intent.MoveX) : 0f));
-        succeeded &= Try(() => sink.LookHorizontal(active && intent.HasTurnInput ? Sanitize(intent.TurnValue) : 0f));
+        long publicationStarted = Stopwatch.GetTimestamp();
+        bool startedActive = active;
+        succeeded &= Try(ContinueMotion() && intent.ShouldRun ? sink.Run : sink.StopRun);
+        succeeded &= Try(() => sink.MoveVertical(ContinueMotion() ? Sanitize(intent.MoveZ) : 0f));
+        succeeded &= Try(() => sink.MoveHorizontal(ContinueMotion() ? Sanitize(intent.MoveX) : 0f));
+        succeeded &= Try(() => sink.LookHorizontal(ContinueMotion() && intent.HasTurnInput ? Sanitize(intent.TurnValue) : 0f));
+
+        // A release, transport gap, or slow send invalidates this captured intent.
+        // Repair channels already sent too, without resetting failure/latency evidence.
+        if (startedActive && !ContinueMotion())
+        {
+            succeeded &= Try(sink.StopRun);
+            succeeded &= Try(() => sink.MoveVertical(0f));
+            succeeded &= Try(() => sink.MoveHorizontal(0f));
+            succeeded &= Try(() => sink.LookHorizontal(0f));
+        }
         return succeeded;
+
+        bool ContinueMotion()
+        {
+            active = active && !LastCommandWasSlow &&
+                Stopwatch.GetElapsedTime(publicationStarted).TotalMilliseconds < SlowCommandThresholdMilliseconds &&
+                (canContinueMotion?.Invoke() ?? true);
+            return active;
+        }
     }
 
     public bool TryNeutralize(IPlayerInputSink sink) => Apply(sink, LeashIntent.Idle, active: false);

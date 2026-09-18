@@ -17,6 +17,39 @@ internal static class StandingPoseMath
     private const float RotationEpsilon = 0.0001f;
     private const float TranslationEpsilonMeters = 0.0005f;
 
+    // IVRSystem exposes raw -> standing; chaperone previews require standing -> raw.
+    // Invert the rigid transform (R^T, -R^T t), including rotation and all translation axes.
+    public static bool TryInvertRigidPose(HmdMatrix34_t pose, out HmdMatrix34_t inverse)
+    {
+        inverse = default;
+        const float tolerance = 0.002f;
+        float xLength = pose.m0 * pose.m0 + pose.m4 * pose.m4 + pose.m8 * pose.m8;
+        float yLength = pose.m1 * pose.m1 + pose.m5 * pose.m5 + pose.m9 * pose.m9;
+        float zLength = pose.m2 * pose.m2 + pose.m6 * pose.m6 + pose.m10 * pose.m10;
+        float xy = pose.m0 * pose.m1 + pose.m4 * pose.m5 + pose.m8 * pose.m9;
+        float xz = pose.m0 * pose.m2 + pose.m4 * pose.m6 + pose.m8 * pose.m10;
+        float yz = pose.m1 * pose.m2 + pose.m5 * pose.m6 + pose.m9 * pose.m10;
+        float determinant = pose.m0 * (pose.m5 * pose.m10 - pose.m6 * pose.m9)
+            - pose.m1 * (pose.m4 * pose.m10 - pose.m6 * pose.m8)
+            + pose.m2 * (pose.m4 * pose.m9 - pose.m5 * pose.m8);
+        if (!Near(xLength, 1f, tolerance) || !Near(yLength, 1f, tolerance) || !Near(zLength, 1f, tolerance) ||
+            !Near(xy, 0f, tolerance) || !Near(xz, 0f, tolerance) || !Near(yz, 0f, tolerance) ||
+            !Near(determinant, 1f, tolerance) ||
+            !float.IsFinite(pose.m3) || !float.IsFinite(pose.m7) || !float.IsFinite(pose.m11))
+            return false;
+
+        inverse = new HmdMatrix34_t
+        {
+            m0 = pose.m0, m1 = pose.m4, m2 = pose.m8,
+            m4 = pose.m1, m5 = pose.m5, m6 = pose.m9,
+            m8 = pose.m2, m9 = pose.m6, m10 = pose.m10,
+            m3 = -(pose.m0 * pose.m3 + pose.m4 * pose.m7 + pose.m8 * pose.m11),
+            m7 = -(pose.m1 * pose.m3 + pose.m5 * pose.m7 + pose.m9 * pose.m11),
+            m11 = -(pose.m2 * pose.m3 + pose.m6 * pose.m7 + pose.m10 * pose.m11)
+        };
+        return float.IsFinite(inverse.m3) && float.IsFinite(inverse.m7) && float.IsFinite(inverse.m11);
+    }
+
     public static HmdMatrix34_t ApplyVerticalOffset(HmdMatrix34_t pose, float verticalOffset)
     {
         pose.m3 += pose.m1 * verticalOffset;
@@ -130,14 +163,33 @@ internal interface IStandingPoseBackend
 
 internal sealed class OpenVrStandingPoseBackend : IStandingPoseBackend
 {
+    private readonly Func<HmdMatrix34_t?> _readRawToStanding;
+    private readonly Func<HmdMatrix34_t, bool> _previewStandingToRaw;
+
+    public OpenVrStandingPoseBackend() : this(
+        () => OpenVR.System?.GetRawZeroPoseToStandingAbsoluteTrackingPose(),
+        PreviewStandingToRaw)
+    {
+    }
+
+    internal OpenVrStandingPoseBackend(
+        Func<HmdMatrix34_t?> readRawToStanding,
+        Func<HmdMatrix34_t, bool> previewStandingToRaw)
+    {
+        _readRawToStanding = readRawToStanding;
+        _previewStandingToRaw = previewStandingToRaw;
+    }
+
     public bool TryRead(out HmdMatrix34_t pose)
     {
-        pose = new HmdMatrix34_t();
+        pose = default;
         try
         {
-            CVRChaperoneSetup? setup = OpenVR.ChaperoneSetup;
-            return setup is not null &&
-                   setup.GetWorkingStandingZeroPoseToRawTrackingPose(ref pose);
+            // A chaperone working copy belongs to this client and can stay unchanged
+            // while OVR Advanced Settings previews a different origin. Read the active
+            // tracking transform for both grab baselines and external-writer detection.
+            HmdMatrix34_t? rawToStanding = _readRawToStanding();
+            return rawToStanding.HasValue && StandingPoseMath.TryInvertRigidPose(rawToStanding.Value, out pose);
         }
         catch
         {
@@ -149,18 +201,23 @@ internal sealed class OpenVrStandingPoseBackend : IStandingPoseBackend
     {
         try
         {
-            CVRChaperoneSetup? setup = OpenVR.ChaperoneSetup;
-            if (setup is null)
-                return false;
-
-            setup.SetWorkingStandingZeroPoseToRawTrackingPose(ref pose);
-            setup.ShowWorkingSetPreview();
-            return true;
+            return _previewStandingToRaw(pose);
         }
         catch
         {
             return false;
         }
+    }
+
+    private static bool PreviewStandingToRaw(HmdMatrix34_t pose)
+    {
+        CVRChaperoneSetup? setup = OpenVR.ChaperoneSetup;
+        if (setup is null)
+            return false;
+
+        setup.SetWorkingStandingZeroPoseToRawTrackingPose(ref pose);
+        setup.ShowWorkingSetPreview();
+        return true;
     }
 }
 

@@ -26,6 +26,9 @@ internal static class BoundedDiagnostics
             _users++;
             var diagnostics = new ModuleDiagnostics(moduleName, _writer);
             diagnostics.Event("module_start");
+            diagnostics.Event("module_build",
+                $"moduleMvid={typeof(BoundedDiagnostics).Module.ModuleVersionId};" +
+                $"hostVersion={typeof(VRCOSC.App.OSC.VRChat.VRChatOSCClient).Assembly.GetName().Version}");
             return diagnostics;
         }
     }
@@ -386,6 +389,7 @@ internal sealed record DiagnosticRecord
     public long? ThreadPoolPending { get; init; }
     public long? FinalizationPending { get; init; }
     public long? DroppedRecords { get; init; }
+    public long? DroppedModuleLogs { get; init; }
 
     public static DiagnosticRecord Event(string module, string name, string? detail) =>
         new() { Utc = DateTimeOffset.UtcNow, Type = "event", Module = module, Name = name, Detail = detail };
@@ -412,7 +416,7 @@ internal sealed record DiagnosticRecord
             Gen0Collections = GC.CollectionCount(0), Gen1Collections = GC.CollectionCount(1), Gen2Collections = GC.CollectionCount(2),
             ThreadCount = process.Threads.Count, ThreadPoolThreads = ThreadPool.ThreadCount,
             ThreadPoolPending = ThreadPool.PendingWorkItemCount, FinalizationPending = gc.FinalizationPendingCount,
-            DroppedRecords = droppedRecords
+            DroppedRecords = droppedRecords, DroppedModuleLogs = RealtimeModuleLog.DroppedMessages
         };
     }
 }

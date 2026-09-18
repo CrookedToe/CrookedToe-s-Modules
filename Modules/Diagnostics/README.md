@@ -34,3 +34,11 @@ Start with OSCLeash `control_loop` records around the first noticeable slowdown:
 5. Check nearby OSCLeash events for stale OSC input, VRChat input failures, or an external OpenVR pose writer.
 
 Reproduce from a fresh VRCOSC start, note the UTC time when degradation becomes visible, then preserve the entire directory before another long run rotates it.
+
+## September 2026 development-build fix
+
+See [the leash degradation investigation](../OSCLeash/DEGRADATION-AUDIT.md) for the reviewed capture inventory, timing evidence, and fixes.
+
+`module_build` records the module assembly MVID and host version at startup. `vrcosc_dispatch_workaround` now reports client resolution even when no new preview observer is found, and records observers discovered after startup.
+
+Leash and audio host log calls use a separate process-wide worker with at most 128 pending messages. This prevents the host's synchronous UI/file logging from blocking control updates. If that queue fills, `runtime.DroppedModuleLogs` increases; the bounded JSONL recorder continues independently. This count is cumulative for the process and does not reset when modules restart.

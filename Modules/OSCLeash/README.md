@@ -70,9 +70,9 @@ VRChat comfort turning can reduce or block this input. Turning does not apply wh
 | Height Limit | 3 m | Maximum distance from the height where the leash was grabbed |
 | Return Height on Release | false | Returns to the grab height after release |
 
-Height drag needs SteamVR, a grab, stretch past Move Start, and a mostly vertical pull. Speed scales with stretch. Return Height accelerates toward the grab height and stops on the target.
+Height drag needs SteamVR, a grab, stretch past Move Start, and a mostly vertical pull. Speed scales with stretch. Return Height accelerates toward the grab height and stops on the target. The grab height includes the current OVR Advanced Settings space drag; returning removes only the height added by the leash.
 
-If another application moves the SteamVR playspace during a grab, height drag waits and then continues from the new height. If that keeps happening, release and grab again.
+If another application moves the SteamVR playspace during a grab, height drag waits and then continues from the new height. If that keeps happening, release and grab again. If OVR takes over during height return, the leash leaves that new position intact instead of restoring the old grab height.
 
 ## Troubleshooting
 
